@@ -1,0 +1,138 @@
+# screensight — GPUI GPU PoC on a Raspberry Pi 4
+
+A proof of concept that **GPUI** (Zed's GPU-accelerated UI framework) can drive
+the Raspberry Pi's display with smooth, GPU-accelerated compositing.
+
+The app is a full-screen animated scene rendered through GPUI's Vulkan
+renderer on the Pi's V3D GPU, with a touch-ripple effect on the DSI panel.
+
+> 📖 New to GPU UIs on the Pi? Read
+> [`docs/gpu-accelerated-ui-on-raspberry-pi-with-rust.md`](docs/gpu-accelerated-ui-on-raspberry-pi-with-rust.md)
+> — a field guide to the drivers, cross-compilation, presentation, and the
+> traps that cost the most time.
+
+```
+┌──────────────────────┐   ssh    ┌────────────────────────────────────────┐
+│  dev machine (x86_64) │ ───────► │  Raspberry Pi 4 (aarch64, Debian 13)   │
+│  cargo + `cross`      │  scp     │  cage (Wayland) ─► GPUI app (Vulkan)   │
+└──────────────────────┘          └────────────────────────────────────────┘
+```
+
+## What you get
+
+* ~1200 orbiting particles, a rotating ring, bouncing balls and a pulsing core,
+  all drawn every frame with GPUI's `canvas` + `paint_quad` API.
+* A declarative animated overlay (bars) driven by `with_animation(..).repeat()`.
+* GPU-rendered status text (frame rate, particle count).
+* Expanding ripples wherever you touch the panel.
+* Full-screen, **tear-free**, cursor-free presentation under
+  [`cage`](https://github.com/Hjdskes/cage) — a single-app Wayland kiosk
+  compositor. When the client buffer is compatible, wlroots *direct scan-outs*
+  it (no intermediate copy), which is the closest a Wayland client can get to
+  Kodi-style direct rendering.
+
+## Hardware / OS this was built for
+
+| | |
+|---|---|
+| Board | Raspberry Pi 4 Model B (4 GB) |
+| Display | 800×480 DSI panel (Raspberry Pi Touch Display, `ft5x06` touch) |
+| OS | Raspberry Pi OS / Debian 13 "trixie", aarch64 |
+| **Kernel** | **≥ 6.18.50** (upgraded — see below) |
+| **Mesa / V3DV** | **≥ 26.2.2** (upgraded — see below) |
+| API | Vulkan (V3DV) for rendering, Wayland for presentation |
+
+## ⚠️ System requirements discovered the hard way
+
+The Pi originally ran kernel `6.12.62` + Mesa `25.0.7`. On that stack, **every**
+GPU app presented to the panel as green/black garbage — even `vkcube`, and even
+under Wayland. `dmesg` filled with:
+
+```
+v3d fec00000.v3d: [drm:v3d_reset [v3d]] *ERROR* Resetting GPU for hang.
+v3d fec00000.v3d: [drm:v3d_reset [v3d]] *ERROR* V3D_ERR_STAT: 0x00001000
+```
+
+The fix was a **stable system upgrade** (a merged Raspberry Pi kernel/V3DV fix
+plus a much newer Mesa):
+
+```sh
+sudo apt-get update
+sudo apt-get -y full-upgrade   # brings kernel 6.18.50 and Mesa 26.2.2
+sudo reboot
+```
+
+After the upgrade, `vkcube` and GPUI both render correctly. **This PoC will not
+work on the old stack.**
+
+## Cross-compilation
+
+Compiled on the dev machine and copied to the Pi.
+
+* `cross` (Docker-based) with a **custom image** (`deploy/cross-image/Dockerfile`)
+  based on `rust:1.98-trixie` + arm64 multiarch dev libraries. `cross`'s stock
+  image is Ubuntu 16.04 and its `libxcb` is too old
+  (`xcb_send_request_with_fds64` is missing), so a custom image is required.
+* The image is built once:
+  ```sh
+  docker build -t screensight-cross-aarch64:latest deploy/cross-image
+  ```
+  `deploy/deploy.sh` assumes it already exists.
+
+```sh
+./deploy/deploy.sh          # build + ship + run
+./deploy/restore-kiosk.sh   # hand the panel back to the HA kiosk
+```
+
+## Runtime layout on the Pi
+
+* `deploy/gpui-poc.service` starts `cage -- /home/remy/gpui-poc/gpui-poc`.
+  It runs as root because `libseat`/logind will not hand DRM master to a
+  transient session while another session owns `tty1` (acceptable for a PoC).
+* The Home Assistant kiosk (`kiosk.service`) is stopped and disabled while this
+  is active. `restore-kiosk.sh` undoes that.
+* A **transparent cursor theme** (`deploy/cursor-theme/blank`) hides the mouse
+  pointer; the HDMI-CEC virtual devices otherwise make `cage` draw one.
+
+## Touch input
+
+GPUI 0.2.2 has **no `wl_touch` support** (and no touch on X11 either), and under
+`cage` the touch panel produces no pointer events. So the app reads the
+touchscreen **evdev device directly** (as Kodi does) — see `src/touch.rs` — and
+maps `[min..max]` to `[0, 1]` screen coordinates. It requires read access to
+`/dev/input/event*` (root, or the `input` group).
+
+## Things that are patched / worked around
+
+These are all in the repo, under `vendor/` and `src/`:
+
+| Issue | Fix |
+|---|---|
+| `xattr 0.2.3` (via `gpui_http_client` → `zed-async-tar`) references `libc::ENOATTR`, absent on Linux/aarch64 | `vendor/xattr`: map `ENOATTR` → `ENODATA` |
+| `blade-graphics` requests an `OPAQUE` composite alpha the V3DV surface does not advertise | `vendor/blade-graphics`: pick a supported flag |
+| `blade-graphics` prefers `MAILBOX` present mode | `vendor/blade-graphics`: prefer `FIFO` |
+| **GPUI's glyph-atlas text rendering hangs V3D** (`V3D_ERR_STAT 0x1000`, green garbage) | Status text is rendered by us as GPU quads from a 8×14 bitmap font (`src/font.rs`, generated by `tools/genfont.py`) instead of GPUI's text layer |
+
+The `blade-graphics` patches are defensive; the system upgrade is what fixed
+presentation. The text workaround is still required on Mesa 26.2.2.
+
+## Scene / tuning knobs
+
+The scene can be trimmed at runtime (useful for driver bisection):
+
+```sh
+GPUI_PARTICLES=1200   # number of orbiting particles
+GPUI_RING=1 GPUI_BALLS=1 GPUI_BARS=1 GPUI_TEXT=1
+GPUI_PUMP=1           # master animation-frame pump
+```
+
+## Source layout
+
+```
+src/main.rs    scene, canvas painting, bitmap text, ripples
+src/font.rs    generated 8x14 bitmap font
+src/touch.rs   direct evdev touchscreen reader
+vendor/        patched xattr + blade-graphics
+deploy/        systemd unit, deploy/restore scripts, cursor theme, cross image
+tools/         font / cursor generators (run with `uv run`)
+```

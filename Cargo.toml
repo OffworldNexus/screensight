@@ -1,0 +1,30 @@
+[package]
+name = "screensight-gpui-poc"
+version = "0.1.0"
+edition = "2021"
+description = "GPUI GPU-acceleration PoC for Raspberry Pi 4 (cross-compiled to aarch64)"
+
+[dependencies]
+# GPUI 0.2.2 ships a consuming Linux renderer. We only need the X11 backend
+# (the Pi's kiosk already runs under Xorg), so we drop the Wayland backend and
+# the (Windows-only) manifest feature to keep the dependency/ABI surface small.
+gpui = { version = "0.2.2", default-features = false, features = ["wayland", "x11"] }
+log = "0.4"
+env_logger = "0.11"
+libc = "0.2"
+anyhow = "1"
+
+# `xattr` 0.2.3 (pulled in transitively via gpui_http_client -> zed-async-tar)
+# refers to `libc::ENOATTR`, which does not exist on Linux/aarch64. We vendor a
+# one-line fix; the tar/xattr code path is never exercised by this PoC.
+#
+# `blade-graphics` requests an unsupported X11 composite-alpha flag on V3DV,
+# which produces garbage output on the Raspberry Pi. See vendor/blade-graphics.
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
+blade-graphics = { path = "vendor/blade-graphics" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

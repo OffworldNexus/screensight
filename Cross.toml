@@ -1,0 +1,9 @@
+# Cross-compilation config for `cross` (https://github.com/cross-rs/cross).
+#
+# GPUI's Linux/X11 stack pulls in native libraries (xkbcommon, fontconfig,
+# freetype, libxcb, the Vulkan loader, ...). We use a custom image based on
+# Debian trixie (the Pi's distro) because cross's stock image is too old
+# (Ubuntu 16.04 / libxcb 1.11). See deploy/cross-image/Dockerfile.
+
+[target.aarch64-unknown-linux-gnu]
+image = "screensight-cross-aarch64:latest"
