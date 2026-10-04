@@ -1,0 +1,30 @@
+[Unit]
+Description=GPUI GPU PoC (Wayland + cage kiosk compositor; temporary)
+After=network-online.target systemd-user-sessions.service
+Wants=network-online.target
+
+[Service]
+# cage is a single-application Wayland kiosk compositor. The client is shown
+# fullscreen and, when its buffer is compatible, wlroots will direct scan it
+# out (no intermediate copy) -- the closest thing to "Kodi-style" direct
+# rendering that a Wayland client can get.
+#
+# Runs as root because libseat/logind will not hand the seat/DRM master to a
+# transient session while another session owns tty1; the built-in seatd
+# backend needs root to open the VT. This is acceptable for a PoC.
+Type=simple
+Environment=XDG_RUNTIME_DIR=/run/gpui-wl
+# Transparent cursor theme: the touch panel must not show a mouse pointer
+# (the vc4-hdmi CEC devices advertise pointer capability).
+Environment=XCURSOR_THEME=blank
+Environment=XCURSOR_PATH=/home/remy/.local/share/icons:/usr/share/icons
+
+ExecStartPre=/bin/mkdir -p /run/gpui-wl
+ExecStartPre=/bin/chmod 700 /run/gpui-wl
+ExecStart=/usr/bin/cage -- /home/remy/gpui-poc/gpui-poc
+
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

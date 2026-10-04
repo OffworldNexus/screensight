@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Screensight / complete device concept</title>
+<style>
+@font-face{font-family:VT323;src:url("fonts/VT323-Regular.ttf")}
+@font-face{font-family:"JetBrains Mono";src:url("fonts/JetBrainsMono[wght].ttf");font-weight:100 800}
+@font-face{font-family:Silkscreen;src:url("fonts/Silkscreen-Regular.ttf")}
+*{box-sizing:border-box}body{margin:0;background:#0b0908;color:#faf7f2;font-family:"JetBrains Mono"}header{padding:28px 36px;border-bottom:1px solid #514943}h1{font:42px VT323;margin:0 0 12px}p{color:#c0b4a4;font-size:13px;line-height:1.6}nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:20px}nav a{padding:8px 12px;color:#c0b4a4;border:1px solid #514943;text-decoration:none;font-size:11px}.gallery{display:grid;grid-template-columns:repeat(auto-fit, minmax(800px,1fr));gap:36px;padding:36px}.specimen{width:800px}.specimen h2{font:16px "JetBrains Mono";margin:0 0 12px}.screen{position:relative;width:800px;height:480px;overflow:hidden;isolation:isolate}.node{position:absolute;line-height:1.15;white-space:pre}.hit{position:absolute;background:transparent;border:0;color:transparent;cursor:pointer;z-index:2}.hit:focus-visible{outline:2px solid #faf7f2;outline-offset:-3px}.note{max-width:800px}.single header,.single .note,.single h2{display:none}.single .gallery{display:block;padding:0}.single .specimen{display:none}.single .specimen.selected{display:block}.single,body.single{width:800px;height:480px;overflow:hidden}
+</style>
+</head>
+<body>
+<header><h1>Screensight / the room terminal</h1><p>800 × 480 · touch · no scroll within the device. Sample data, not a live Home Assistant connection.<br>Maintenance → immediate action → critical. Snooze preserves a corner indicator; discard suppresses this occurrence.</p><nav id="index"></nav></header>
+<main class="gallery" id="gallery"></main>
+<script src="screensight-screen-set.js"></script>
+<script>
+/* The gallery scrolls only as a review document; each device scene is fixed.
+ * Query ?screen=id gives a native-size, single-screen screenshot target. */
+const selected=new URLSearchParams(location.search).get('screen');
+if(selected)document.body.classList.add('single');
+for(const scene of screensightScenes){
+  const section=document.createElement('section');section.className='specimen'+(scene.id===selected?' selected':'');section.id=scene.id;
+  const heading=document.createElement('h2');heading.textContent=scene.title;section.appendChild(heading);
+  const screen=document.createElement('div');screen.className='screen';screen.style.background=scene.background;screen.setAttribute('aria-label',scene.title);section.appendChild(screen);
+  for(const n of scene.nodes){
+    if(n.type==='line'){const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 800 480');svg.style='position:absolute;inset:0;width:800px;height:480px';const line=document.createElementNS(svg.namespaceURI,'polyline');line.setAttribute('points',n.points.map(p=>p.join(',')).join(' '));line.setAttribute('fill','none');line.setAttribute('stroke',n.fill);line.setAttribute('stroke-width','3');svg.appendChild(line);screen.appendChild(svg);continue;}
+    if(n.type==='wave'){const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.style=`position:absolute;left:${n.x}px;top:${n.y}px;width:${n.w}px;height:${n.h}px`;svg.setAttribute('viewBox',`0 0 ${n.w} ${n.h}`);const p=document.createElementNS(svg.namespaceURI,'path');p.setAttribute('d',`M1 1 H${n.w-n.notch} L${n.w-1} ${n.notch} V${n.h-1} H1 Z`);p.setAttribute('stroke',n.fill);p.setAttribute('fill','none');p.setAttribute('stroke-width','1.5');svg.appendChild(p);screen.appendChild(svg);continue;}
+    const e=document.createElement('div');e.className='node';e.style.left=n.x+'px';e.style.top=n.y+'px';if(n.type==='text'){e.textContent=n.text;e.style.fontFamily=n.font;e.style.fontSize=n.size+'px';e.style.fontWeight=n.weight;e.style.color=n.fill;}else{e.style.width=n.w+'px';e.style.height=n.h+'px';e.style.background=n.fill;e.style.borderRadius=n.r+'px';if(n.type==='cut')e.style.clipPath=`polygon(3px 0,calc(100% - ${n.notch}px) 0,100% ${n.notch}px,100% calc(100% - 3px),calc(100% - 3px) 100%,3px 100%,0 calc(100% - 3px),0 3px)`;}screen.appendChild(e);
+  }
+  for(const l of scene.links){const b=document.createElement('button');b.className='hit';b.setAttribute('aria-label',l.label);b.style.left=l.x+'px';b.style.top=l.y+'px';b.style.width=l.w+'px';b.style.height=l.h+'px';b.onclick=()=>{if(selected)location.search='?screen='+l.target;else document.getElementById(l.target).scrollIntoView({block:'start'});};screen.appendChild(b);}
+  const note=document.createElement('p');note.className='note';note.textContent=scene.note;section.appendChild(note);document.getElementById('gallery').appendChild(section);
+  const a=document.createElement('a');a.href='#'+scene.id;a.textContent=scene.title;document.getElementById('index').appendChild(a);
+}
+</script>
+</body>
+</html>

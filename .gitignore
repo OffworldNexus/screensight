@@ -1,0 +1,35 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+allure-results/
+test-results/
+.coverage
+htmlcov/
+
+# HA throwaway dev instance (generated)
+custom_components/screensight/dev/config/
+!custom_components/screensight/dev/config/.gitkeep
+
+# Debian package build output
+deploy/deb/out/
+*.deb
+
+# Local env
+.env
+.env.*
+/tmp/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
