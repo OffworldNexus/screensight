@@ -6,7 +6,7 @@ license = { text = "MIT" }
 authors = [
     { name = "Rémy Sanchez", email = "remy.sanchez@hyperthese.net" },
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "homeassistant",
 ]
@@ -32,7 +32,7 @@ default-groups = ["dev"]
 # are loaded dynamically; HA ships no type stubs for third-party integrations.
 # A good chunk of the HA API is annotated, but several helpers are not, so we
 # keep the checks pragmatic: catch real errors without demanding stubs.
-python_version = "3.12"
+python_version = "3.13"
 check_untyped_defs = true
 warn_unused_ignores = true
 
