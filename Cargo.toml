@@ -7,15 +7,20 @@
 resolver = "2"
 members = ["device"]
 
-# The three patched crates live in their own repos (each README documents the
-# delta) and are pinned by rev so builds stay reproducible. `xattr` 0.2.3
-# references `libc::ENOATTR`, absent on Linux/aarch64; `blade-graphics` 0.7.1
-# needs a V3DV-compatible X11/MAILBOX path; `gpui` 0.2.2 carries the Screensight
-# GPU CRT screen-transition shader (see `paint_crt_transition` and the `crt`
-# branch in `shaders.wgsl`).
+# Three patched crates, pinned by rev so builds stay reproducible.
+#   * `xattr` 0.2.3 and `blade-graphics` 0.7.1 are commits on a `screensight`
+#     branch of a real fork of their upstream (OffworldNexus/xattr,
+#     OffworldNexus/blade), so the patches live in the fork network and can be
+#     offered upstream. `xattr` has no `ENOATTR` on Linux/aarch64;
+#     `blade-graphics` needs a V3DV-compatible composite-alpha/present-mode path.
+#   * `gpui` 0.2.2 has no standalone upstream: it is `crates/gpui` in the zed
+#     monorepo, which uses workspace/path deps (so building from a zed fork would
+#     pull a large subgraph and clone ~520 MB). It is therefore a standalone
+#     patched mirror of the published crate, carrying the Screensight GPU CRT
+#     screen-transition shader.
 [patch.crates-io]
-xattr = { git = "https://github.com/OffworldNexus/xattr", rev = "52407f0b6d8c83da642ccdb0a684c7d952b847d4" }
-blade-graphics = { git = "https://github.com/OffworldNexus/blade-graphics", rev = "5b6b12aa6c57fb358fc296e0957e996514fdd983" }
+xattr = { git = "https://github.com/OffworldNexus/xattr", rev = "ff3eae4d59b70ecd25fd312a03b439575caa9d4d" }
+blade-graphics = { git = "https://github.com/OffworldNexus/blade", rev = "2fa58fb0c5faff7653a5910ff05e13125ebb8692" }
 gpui = { git = "https://github.com/OffworldNexus/gpui", rev = "cf52b95becd458d7594efdcb5db91d474caac2ac" }
 
 [profile.release]

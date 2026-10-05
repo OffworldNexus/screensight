@@ -683,7 +683,7 @@ dependencies = [
 [[package]]
 name = "blade-graphics"
 version = "0.7.1"
-source = "git+https://github.com/OffworldNexus/blade-graphics?rev=5b6b12aa6c57fb358fc296e0957e996514fdd983#5b6b12aa6c57fb358fc296e0957e996514fdd983"
+source = "git+https://github.com/OffworldNexus/blade?rev=2fa58fb0c5faff7653a5910ff05e13125ebb8692#2fa58fb0c5faff7653a5910ff05e13125ebb8692"
 dependencies = [
  "ash",
  "ash-window",
@@ -7605,7 +7605,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 [[package]]
 name = "xattr"
 version = "0.2.3"
-source = "git+https://github.com/OffworldNexus/xattr?rev=52407f0b6d8c83da642ccdb0a684c7d952b847d4#52407f0b6d8c83da642ccdb0a684c7d952b847d4"
+source = "git+https://github.com/OffworldNexus/xattr?rev=ff3eae4d59b70ecd25fd312a03b439575caa9d4d#ff3eae4d59b70ecd25fd312a03b439575caa9d4d"
 dependencies = [
  "libc",
 ]
