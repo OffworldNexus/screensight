@@ -1,0 +1,20 @@
+#!/bin/sh
+# Configure the Screensight package on the Raspberry Pi.
+set -e
+
+if [ "$1" = configure ]; then
+    systemctl daemon-reload || true
+    # Retire the previous kiosk / GPUI PoC compositors; they hold DRM master and
+    # would prevent Screensight's cage from taking the display.
+    systemctl disable --now gpui-poc.service >/dev/null 2>&1 || true
+    systemctl disable --now kiosk.service >/dev/null 2>&1 || true
+    systemctl enable screensight.socket >/dev/null 2>&1 || true
+    systemctl enable cage.service >/dev/null 2>&1 || true
+    systemctl enable screensightd.service >/dev/null 2>&1 || true
+    # Pick up the new units without requiring a reboot.
+    systemctl restart cage.service >/dev/null 2>&1 || true
+    systemctl restart screensight.socket >/dev/null 2>&1 || true
+    systemctl restart screensightd.service >/dev/null 2>&1 || true
+fi
+
+exit 0

@@ -1,0 +1,19 @@
+services:
+  homeassistant:
+    # Throwaway Screensight development instance. Never production.
+    image: ${SCREENSIGHT_HA_IMAGE:-ghcr.io/home-assistant/home-assistant:stable}
+    container_name: screensight-ha
+    # Host networking is required for zeroconf/mDNS discovery of the device;
+    # a bridged container would never see `_screensight._tcp`.
+    network_mode: host
+    # NOTE: do not add `init: true` — Home Assistant's s6-overlay must be PID 1.
+    # Ctrl+C safety comes from running detached and following logs separately.
+    # Run as the invoking user so bind-mounted config files stay owned by you
+    # (and are therefore removable without sudo).
+    user: "${SCREENSIGHT_HA_UID:-1000}:${SCREENSIGHT_HA_GID:-1000}"
+    restart: "no"
+    stop_grace_period: 15s
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ${SCREENSIGHT_HA_CONFIG:?set by scripts/ha-dev.sh}:/config
