@@ -117,13 +117,13 @@ def _connected_device(hass):
 
 
 @when(parsers.parse('I set the Display text entity to "{value}"'))
-def _set_text(display, value):
+def _set_value(display, value):
     """Ask the entity to update the panel text."""
     display["hass"].loop.run_until_complete(display["entity"].async_set_value(value))
 
 
-@then(parsers.parse('the device receives a set_text frame with "{value}"'))
-def _frame_received(display, value):
-    """The exact ``set_text`` frame must have reached the device."""
-    assert {"type": "set_text", "text": value} in display["ws"].sent
-    assert display["connection"].text == value
+@then(parsers.parse('the device receives a "{key}" value of "{value}"'))
+def _frame_received(display, key, value):
+    """The exact ``set_value`` frame must have reached the device."""
+    assert {"type": "set_value", "key": key, "value": value} in display["ws"].sent
+    assert display["connection"].value(key) == value

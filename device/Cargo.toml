@@ -21,7 +21,7 @@ name = "screensightd"
 path = "src/main.rs"
 
 [[example]]
-name = "hello"
+name = "crt-demo"
 required-features = ["gui"]
 
 [dependencies]
@@ -59,11 +59,25 @@ tokio = { version = "1.53", features = [
 ] }
 listenfd = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
-thiserror = "2"
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+# Persistence: SQLite through SeaORM. The daemon keeps state in memory (the GPUI
+# panel mutates it synchronously on its own thread); a background actor owns the
+# connection and applies writes, so no async ever leaks into the panel.
+sea-orm = { version = "2.0.3", default-features = false, features = [
+    "sqlx-sqlite",
+    "runtime-tokio",
+    "macros",
+] }
+# Feature-only dependency: `sqlite-bundled` compiles SQLite from source through
+# the sqlx facade. There is no aarch64 libsqlite3-dev in the cross image, so the
+# system library cannot be used. We never call sqlx directly.
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite-bundled"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "time", "net"] }
+# Validate the vendored-gpui WGSL (including the Screensight CRT transition)
+# offline, without a GPU, so a broken shader fails CI instead of the panel.
+naga = { version = "25", features = ["wgsl-in"] }

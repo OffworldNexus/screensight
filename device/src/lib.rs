@@ -6,9 +6,10 @@
 //! the CPU rasteriser) lives here as plain, testable modules.
 
 pub mod control;
-pub mod font;
+pub mod db;
 pub mod identity;
 pub mod mdns;
+pub mod names;
 pub mod pairing;
 pub mod protocol;
 pub mod random;

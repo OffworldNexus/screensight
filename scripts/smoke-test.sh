@@ -3,7 +3,7 @@
 # no physical panel:
 #
 #   boot -> mDNS -> pairing window -> WebSocket pairing -> on-device confirm
-#   (via the control CLI) -> token -> set_text round trip.
+#   (via the control CLI) -> token -> set_value round trip.
 #
 # Requires the Rust toolchain; uses `uv` for the WebSocket client when present
 # (otherwise it tells you to run the Rust integration test instead).
@@ -65,13 +65,13 @@ echo "==> re-arming pairing window"
 CODE="$(pairing_code)"
 echo "    new pairing code: ${CODE}"
 
-echo "==> full WebSocket pairing + set_text"
+echo "==> full WebSocket pairing + set_value"
 if command -v uv >/dev/null 2>&1; then
     uv run "${ROOT}/scripts/fake-ha.py" --port "${PORT}" pair \
         --code "${CODE}" --device-id "${ID}" >"${WORK}/fake.log" 2>&1 &
     FAKE_PID=$!
     sleep 3
-    # Simulate the user tapping "Yes · pair this display" on the panel.
+    # Simulate the user tapping "Pair" on the panel.
     "${BIN}/screensight" confirm >/dev/null
     wait "${FAKE_PID}" || true
     FAKE_PID=""

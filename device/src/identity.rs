@@ -1,10 +1,10 @@
-//! Stable device identity and the high-entropy mDNS instance name.
+//! Stable device identity and the human-friendly mDNS name.
 //!
-//! The instance name is what Home Assistant remembers as the device identity
-//! and what the integration re-resolves over mDNS when the device's IP changes;
-//! the opaque `id` is what travels in the zeroconf TXT record. Both are
-//! generated once on first boot and persisted, so the pairing survives reboots
-//! and DHCP changes.
+//! The name is a randomly drawn adjective+noun pair ("Brave Otter") shown on
+//! the pairing screen and advertised over mDNS, so Home Assistant discovers the
+//! device under that name. The opaque `id` is what travels in the zeroconf TXT
+//! record and identifies the device durably. Both are generated once on first
+//! boot and persisted, so the pairing survives reboots and DHCP changes.
 //!
 //! Neither value contains the pairing code; see [`crate::pairing`].
 
@@ -13,15 +13,13 @@ use serde::{Deserialize, Serialize};
 
 /// Number of random bytes behind the opaque device id.
 const ID_BYTES: usize = 8;
-/// Number of random bytes used for the human-readable instance name.
-const NAME_BYTES: usize = 4;
 
 /// Everything Home Assistant needs to recognise and re-find this device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceIdentity {
     /// Opaque, stable identifier advertised in the TXT `id` key.
     pub id: String,
-    /// High-entropy mDNS instance name (`screensight-<hex>`), remembered by HA.
+    /// Human-friendly name ("Brave Otter"), remembered by Home Assistant.
     pub name: String,
     /// Human-facing model advertised in TXT `model`.
     pub model: String,
@@ -38,10 +36,10 @@ impl DeviceIdentity {
     /// Returns an error if the OS random source is unavailable.
     pub fn generate(model: impl Into<String>, version: impl Into<String>) -> Result<Self> {
         let id = crate::random::hex(ID_BYTES).context("generating device id")?;
-        let suffix = crate::random::hex(NAME_BYTES).context("generating instance name")?;
+        let name = crate::names::generate().context("generating device name")?;
         Ok(Self {
             id,
-            name: format!("screensight-{suffix}"),
+            name,
             model: model.into(),
             version: version.into(),
         })
@@ -59,13 +57,13 @@ mod tests {
 
         assert_eq!(a.id.len(), ID_BYTES * 2);
         assert!(a.id.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(a.name.starts_with("screensight-"));
-        assert_eq!(a.name.len(), "screensight-".len() + NAME_BYTES * 2);
+        assert!(!crate::names::is_legacy(&a.name));
+        assert_eq!(a.name.split(' ').count(), 2);
         assert_eq!(a.model, "Screensight Studio");
         assert_eq!(a.version, "0.1.0");
 
-        // Entropy: two independent draws must not collide.
+        // Entropy: two independent ids must not collide. Names are drawn from a
+        // small word list, so a repeat is possible and deliberately not asserted.
         assert_ne!(a.id, b.id);
-        assert_ne!(a.name, b.name);
     }
 }

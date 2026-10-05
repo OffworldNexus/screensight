@@ -32,10 +32,10 @@ enum Command {
     Pair,
     /// Close the pairing window without pairing.
     CancelPair,
-    /// Confirm a pending pairing as if the user tapped "Yes" on the panel.
+    /// Confirm a pending pairing as if the user tapped "Pair" on the panel.
     /// Intended for headless and automated testing.
     Confirm,
-    /// Decline a pending pairing as if the user tapped "Not my home".
+    /// Decline a pending pairing as if the user tapped "Cancel".
     Reject,
     /// Forget one paired instance, or every instance with --all.
     Unpair {

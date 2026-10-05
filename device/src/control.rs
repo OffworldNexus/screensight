@@ -114,10 +114,10 @@ fn handle_request(runtime: &Runtime, request: ControlRequest) -> ControlResponse
             Ok(None) => ControlResponse::error("no pending pairing to confirm"),
             Err(err) => ControlResponse::error(format!("{err:#}")),
         },
-        ControlRequest::Reject => match runtime.reject_pairing() {
-            Ok(()) => ControlResponse::status(runtime.status()),
-            Err(err) => ControlResponse::error(format!("{err:#}")),
-        },
+        ControlRequest::Reject => {
+            runtime.reject_pairing();
+            ControlResponse::status(runtime.status())
+        }
         ControlRequest::Unpair { id, all } => {
             if !all && id.is_none() {
                 return ControlResponse::error("unpair requires an id or --all");

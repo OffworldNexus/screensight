@@ -25,7 +25,7 @@ async def async_get_config_entry_diagnostics(
         "options": async_redact_data(dict(entry.options), TO_REDACT),
         "connection": {
             "available": bool(connection.available) if connection else False,
-            "text": connection.text if connection else None,
+            "values": connection.values if connection else {},
             "selected": connection.selected if connection else False,
             "host": connection.host if connection else None,
         },

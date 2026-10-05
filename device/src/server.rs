@@ -40,12 +40,17 @@ pub fn router(runtime: Arc<Runtime>) -> Router {
         .with_state(runtime)
 }
 
+/// Bind `0.0.0.0:<port>` for the WebSocket server.
+pub async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding websocket server on {addr}"))
+}
+
 /// Bind `0.0.0.0:<port>` and serve until the process exits.
 pub async fn serve(runtime: Arc<Runtime>, port: u16) -> Result<()> {
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("binding websocket server on {addr}"))?;
+    let listener = bind(port).await?;
     serve_listener(runtime, listener).await
 }
 
@@ -97,11 +102,7 @@ async fn handle_socket(
     if let Some(instance) = &instance {
         runtime.set_connected(&instance.ha_id, true);
         log::info!("{} connected ({})", instance.ha_name, instance.ha_id);
-        let state = ServerMessage::State {
-            text: runtime.text_for(&instance.ha_id),
-            selected: runtime.status().selected.as_deref() == Some(instance.ha_id.as_str()),
-        };
-        let _ = send(&mut sender, &state).await;
+        let _ = send(&mut sender, &current_state(&runtime, &instance.ha_id)).await;
     }
 
     while let Some(frame) = receiver.next().await {
@@ -156,27 +157,18 @@ async fn handle_socket(
                 )
                 .await;
             }
-            ClientMessage::GetState => {
+            ClientMessage::SetValue { key, value } => {
                 if let Some(instance) = &instance {
-                    let state = ServerMessage::State {
-                        text: runtime.text_for(&instance.ha_id),
-                        selected: runtime.status().selected.as_deref()
-                            == Some(instance.ha_id.as_str()),
-                    };
-                    let _ = send(&mut sender, &state).await;
+                    runtime.set_value(&instance.ha_id, &key, &value);
+                    let _ = send(&mut sender, &current_state(&runtime, &instance.ha_id)).await;
                 } else {
                     let _ = send_unauthenticated(&mut sender).await;
                 }
             }
-            ClientMessage::SetText { text } => {
+            ClientMessage::SetState { values } => {
                 if let Some(instance) = &instance {
-                    runtime.set_text(&instance.ha_id, Some(text));
-                    let state = ServerMessage::State {
-                        text: runtime.text_for(&instance.ha_id),
-                        selected: runtime.status().selected.as_deref()
-                            == Some(instance.ha_id.as_str()),
-                    };
-                    let _ = send(&mut sender, &state).await;
+                    runtime.set_values(&instance.ha_id, values);
+                    let _ = send(&mut sender, &current_state(&runtime, &instance.ha_id)).await;
                 } else {
                     let _ = send_unauthenticated(&mut sender).await;
                 }
@@ -292,11 +284,7 @@ async fn await_confirmation(
 
         // Pending cleared without pairing: declined or timed out.
         if runtime.pending_pair().is_none() {
-            let reason = if runtime.pairing_open(Instant::now()) {
-                PairRejection::Declined
-            } else {
-                PairRejection::TimedOut
-            };
+            let reason = runtime.take_rejection().unwrap_or(PairRejection::TimedOut);
             let _ = send(sender, &ServerMessage::PairRejected { reason }).await;
             return;
         }
@@ -311,6 +299,14 @@ async fn await_confirmation(
             .await;
             return;
         }
+    }
+}
+
+/// The full `state` frame describing one instance right now.
+fn current_state(runtime: &Runtime, ha_id: &str) -> ServerMessage {
+    ServerMessage::State {
+        values: runtime.values_for(ha_id),
+        selected: runtime.status().selected.as_deref() == Some(ha_id),
     }
 }
 

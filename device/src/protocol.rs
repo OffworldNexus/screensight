@@ -2,6 +2,8 @@
 //! control socket. Keeping them in one module (and serialising with serde)
 //! makes the contract the single source of truth for both sides.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A message sent by Home Assistant to the device over the WebSocket.
@@ -16,10 +18,12 @@ pub enum ClientMessage {
         ha_id: String,
         ha_name: String,
     },
-    /// Ask for the current display state (sent right after connecting).
-    GetState,
-    /// Replace this instance's display text.
-    SetText { text: String },
+    /// Set one dashboard value. Other values are left untouched.
+    SetValue { key: String, value: String },
+    /// Replace this instance's whole dashboard state. Sent on every
+    /// (re)connection so the device and Home Assistant agree on the full set,
+    /// then whenever more than one value changes at once.
+    SetState { values: BTreeMap<String, String> },
     /// Heartbeat.
     Ping,
 }
@@ -29,7 +33,7 @@ pub enum ClientMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     /// The code was correct; the device is now waiting for the on-panel
-    /// "Yes · pair this display" confirmation.
+    /// confirmation.
     PairPending {
         device_id: String,
         name: String,
@@ -42,7 +46,7 @@ pub enum ServerMessage {
         name: String,
         ha_id: String,
     },
-    /// The user tapped "Not my home", or the window closed first.
+    /// The user declined on the panel, or the window closed first.
     PairRejected { reason: PairRejection },
     /// The pairing request could not be accepted.
     PairError {
@@ -53,9 +57,9 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         attempts_left: Option<u32>,
     },
-    /// Current display state for the authenticated instance.
+    /// The authenticated instance's full dashboard state.
     State {
-        text: Option<String>,
+        values: BTreeMap<String, String>,
         /// Whether this instance is the one currently shown on the panel.
         selected: bool,
     },
@@ -95,12 +99,12 @@ pub enum ControlRequest {
     Pair,
     /// Close the pairing window without pairing.
     CancelPair,
-    /// Confirm the pending pairing as if the user tapped "Yes" on the panel.
+    /// Confirm the pending pairing as if the user tapped "Pair" on the panel.
     ///
     /// Intended for headless/automated testing; the panel remains the normal
     /// path.
     Confirm,
-    /// Decline the pending pairing as if the user tapped "Not my home".
+    /// Decline the pending pairing as if the user tapped "Cancel".
     Reject,
     /// Forget one instance, or all of them.
     Unpair {
@@ -190,9 +194,15 @@ mod tests {
                 ha_id: "ha1".into(),
                 ha_name: "My home".into(),
             },
-            ClientMessage::GetState,
-            ClientMessage::SetText {
-                text: "Hello 🌧".into(),
+            ClientMessage::SetValue {
+                key: "text".into(),
+                value: "Hello 🌧".into(),
+            },
+            ClientMessage::SetState {
+                values: BTreeMap::from([
+                    ("text".to_owned(), "Hello".to_owned()),
+                    ("accent".to_owned(), "gorget".to_owned()),
+                ]),
             },
             ClientMessage::Ping,
         ];
@@ -212,6 +222,17 @@ mod tests {
         .unwrap();
         assert!(json.contains("\"type\":\"pair_error\""));
         assert!(json.contains("\"reason\":\"rate_limited\""));
+    }
+
+    #[test]
+    fn state_frame_carries_the_values_map() {
+        let json = serde_json::to_string(&ServerMessage::State {
+            values: BTreeMap::from([("text".to_owned(), "Hi".to_owned())]),
+            selected: true,
+        })
+        .unwrap();
+        assert!(json.contains("\"values\":{\"text\":\"Hi\"}"));
+        assert!(json.contains("\"selected\":true"));
     }
 
     #[test]

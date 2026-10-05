@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from zeroconf import ServiceStateChange
 
 from custom_components.screensight import connection as connection_module
 from custom_components.screensight.connection import (
@@ -62,34 +64,35 @@ async def test_backoff_delay_grows_and_caps(hass) -> None:
     assert connection._backoff_delay() == 60.0
 
 
-async def test_set_text_sends_frame(hass) -> None:
-    """``async_set_text`` writes the exact protocol frame and caches it."""
+async def test_set_value_sends_frame(hass) -> None:
+    """``async_set_value`` writes the exact protocol frame and caches it."""
     connection, _ = _connection(hass)
     ws = FakeWebSocket()
     connection._ws = ws
     connection._set_connected(True)
 
-    await connection.async_set_text("Hello 🌧")
+    await connection.async_set_value("text", "Hello 🌧")
 
-    assert ws.sent == [{"type": "set_text", "text": "Hello 🌧"}]
-    assert connection.text == "Hello 🌧"
+    assert ws.sent == [{"type": "set_value", "key": "text", "value": "Hello 🌧"}]
+    assert connection.value("text") == "Hello 🌧"
     assert connection.available is True
 
 
-async def test_set_text_requires_connection(hass) -> None:
-    """Setting text while disconnected raises a HomeAssistantError."""
+async def test_set_value_requires_connection(hass) -> None:
+    """Setting a value while disconnected raises a HomeAssistantError."""
     connection, _ = _connection(hass)
     with pytest.raises(HomeAssistantError):
-        await connection.async_set_text("nope")
+        await connection.async_set_value("text", "nope")
 
 
-async def test_state_frame_updates_text(hass) -> None:
+async def test_state_frame_updates_values(hass) -> None:
     """A ``state`` frame is mirrored and flags the panel selection."""
     connection, _ = _connection(hass)
     await connection._async_handle_message(
-        {"type": "state", "text": "Hi", "selected": True}
+        {"type": "state", "values": {"text": "Hi"}, "selected": True}
     )
-    assert connection.text == "Hi"
+    assert connection.value("text") == "Hi"
+    assert connection.values == {"text": "Hi"}
     assert connection.selected is True
 
 
@@ -98,8 +101,19 @@ async def test_state_frame_notifies_listeners(hass) -> None:
     connection, _ = _connection(hass)
     calls: list[int] = []
     connection.async_add_listener(lambda: calls.append(1))
-    await connection._async_handle_message({"type": "state", "text": "x"})
+    await connection._async_handle_message({"type": "state", "values": {"text": "x"}})
     assert calls == [1]
+
+
+async def test_connect_resends_desired_state(hass, monkeypatch) -> None:
+    """On (re)connect the values Home Assistant holds are re-sent."""
+    connection, _ = _connection(hass)
+    connection._desired = {"text": "keep"}
+    ws = FakeWebSocket([aiohttp.ClientConnectionError("down")])
+    _patch_session(monkeypatch, ws)
+    with pytest.raises(aiohttp.ClientConnectionError):
+        await connection._connect_and_listen()
+    assert {"type": "set_state", "values": {"text": "keep"}} in ws.sent
 
 
 async def test_run_reconnects_with_growing_backoff(hass, monkeypatch) -> None:
@@ -171,3 +185,29 @@ async def test_start_and_stop_are_idempotent(hass, monkeypatch) -> None:
     await connection.async_stop()
     assert connection._task is None
     assert connection.available is False
+
+
+async def test_mdns_announcement_wakes_the_retry_sleep(hass) -> None:
+    """Our device re-announcing ends the backoff sleep early."""
+    connection, _ = _connection(hass, service_name=SERVICE_NAME)
+    task = asyncio.ensure_future(connection._async_sleep_with_wake(30))
+    await asyncio.sleep(0)
+    connection._async_on_service(
+        None, "_screensight._tcp.local.", SERVICE_NAME, ServiceStateChange.Added
+    )
+    # Returns long before the 30s timeout would have elapsed.
+    await asyncio.wait_for(task, timeout=1)
+
+
+async def test_other_services_do_not_wake_the_sleep(hass) -> None:
+    """A different device's announcement is ignored."""
+    connection, _ = _connection(hass, service_name=SERVICE_NAME)
+    task = asyncio.ensure_future(connection._async_sleep_with_wake(0.05))
+    connection._async_on_service(
+        None,
+        "_screensight._tcp.local.",
+        "Other Device._screensight._tcp.local.",
+        ServiceStateChange.Added,
+    )
+    await task  # completes only once its own short timeout elapses
+    assert not connection._wake.is_set()

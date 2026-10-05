@@ -33,8 +33,8 @@ WS_PATH: Final = "/ws"
 
 # Client -> device message types.
 TYPE_PAIR: Final = "pair"
-TYPE_GET_STATE: Final = "get_state"
-TYPE_SET_TEXT: Final = "set_text"
+TYPE_SET_VALUE: Final = "set_value"
+TYPE_SET_STATE: Final = "set_state"
 TYPE_PING: Final = "ping"
 
 # Device -> client message types.

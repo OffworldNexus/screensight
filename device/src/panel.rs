@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    div, App, Application, Bounds, Context, Corners, IntoElement, MouseButton, MouseDownEvent,
-    Render, RenderImage, Window, WindowBounds, WindowOptions,
+    div, App, Application, Bounds, Context, Corners, CursorStyle, IntoElement, MouseButton,
+    MouseDownEvent, Render, RenderImage, Window, WindowBounds, WindowOptions,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -45,7 +45,7 @@ pub fn set_screen(screen: Screen) {
 }
 
 /// Run the GPUI panel on the calling (main) thread until the window closes.
-pub fn run(runtime: Arc<Runtime>, model: String) -> anyhow::Result<()> {
+pub fn run(runtime: Arc<Runtime>) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::unbounded_channel::<Screen>();
     let _ = SCREEN_TX.set(tx.clone());
     if let Some(pending) = LATEST.lock().expect("panel latest mutex poisoned").take() {
@@ -60,7 +60,7 @@ pub fn run(runtime: Arc<Runtime>, model: String) -> anyhow::Result<()> {
             origin: gpui::point(gpui::px(0.), gpui::px(0.)),
             size: gpui::size(gpui::px(WIDTH as f32), gpui::px(HEIGHT as f32)),
         };
-        let view = cx.new(|cx| Panel::new(rx, runtime, model, touches, cx));
+        let view = cx.new(|cx| Panel::new(rx, runtime, touches, cx));
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -80,25 +80,74 @@ pub fn run(runtime: Arc<Runtime>, model: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Cached frame for a given view (screen + pressed key + help overlay).
-type FrameCache = Option<(Screen, Option<HitAction>, bool, Arc<RenderImage>)>;
+/// Default duration of the CRT screen-change transition (seconds). Override at
+/// runtime with `SCREENSIGHT_TRANSITION_MS` to tune the feel without rebuilding.
+const DEFAULT_TRANSITION_SECS: f32 = 0.4;
+
+/// The transition duration: `SCREENSIGHT_TRANSITION_MS` (clamped to 50 ms–10 s)
+/// or [`DEFAULT_TRANSITION_SECS`].
+fn transition_secs() -> f32 {
+    static SECS: OnceLock<f32> = OnceLock::new();
+    *SECS.get_or_init(|| {
+        std::env::var("SCREENSIGHT_TRANSITION_MS")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .map(|ms| (ms / 1000.0).clamp(0.05, 10.0))
+            .unwrap_or(DEFAULT_TRANSITION_SECS)
+    })
+}
+
+/// Whether to hide the mouse pointer. The device's systemd unit sets
+/// `SCREENSIGHT_HIDE_CURSOR`; the desktop emulator leaves it unset so the
+/// pointer stays visible for clicking.
+fn hide_cursor() -> bool {
+    static HIDE: OnceLock<bool> = OnceLock::new();
+    *HIDE.get_or_init(|| std::env::var_os("SCREENSIGHT_HIDE_CURSOR").is_some())
+}
+
+/// Cached frame for a given view (screen + pressed key).
+type FrameCache = Option<(Screen, Option<HitAction>, Arc<RenderImage>)>;
+
+/// Stack two same-size frames into a single image: `top` on top, `bottom`
+/// below. The CRT transition samples both halves from this one atlas tile, which
+/// is what keeps the effect working once the sprite atlas has several pages.
+pub fn stacked_frame(top: &RenderImage, bottom: &RenderImage) -> Option<Arc<RenderImage>> {
+    let top_bytes = top.as_bytes(0)?;
+    let bottom_bytes = bottom.as_bytes(0)?;
+    if top_bytes.len() != bottom_bytes.len() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(top_bytes.len() * 2);
+    bytes.extend_from_slice(top_bytes);
+    bytes.extend_from_slice(bottom_bytes);
+    let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+        WIDTH as u32,
+        (HEIGHT * 2) as u32,
+        bytes,
+    )?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+}
 
 struct Panel {
     screen: Screen,
-    model: String,
     runtime: Arc<Runtime>,
     hits: Vec<(HitRegion, HitAction)>,
     cache: FrameCache,
     pressed: Option<(HitAction, Instant)>,
-    /// Whether the connection-help overlay is showing instead of the screen.
-    show_help: bool,
+    /// Outgoing frame kept alive while a screen-change transition runs.
+    prev_image: Option<Arc<RenderImage>>,
+    /// Stacked outgoing+incoming frame uploaded for the CRT transition.
+    transition_image: Option<Arc<RenderImage>>,
+    /// Wall-clock start of the running transition, if any.
+    transition_start: Option<Instant>,
+    /// Last screen, used to detect view changes to animate.
+    last_view: Option<Screen>,
 }
 
 impl Panel {
     fn new(
         rx: UnboundedReceiver<Screen>,
         runtime: Arc<Runtime>,
-        model: String,
         touches: Arc<Mutex<Vec<TouchSample>>>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -109,9 +158,8 @@ impl Panel {
                 if this
                     .update(cx, |panel, cx| {
                         panel.screen = screen;
-                        // A runtime state change always leaves the help overlay.
-                        panel.show_help = false;
-                        panel.cache = None;
+                        // The frame cache is left in place so `render` can still
+                        // see the previous frame and animate to the new one.
                         cx.notify();
                     })
                     .is_err()
@@ -145,17 +193,15 @@ impl Panel {
         })
         .detach();
 
-        // Soft 1 Hz heartbeat only while awaiting a Home Assistant, so the
-        // pairing deck stays live without a 60 fps render loop.
-        let heartbeat_executor = cx.background_executor().clone();
+        // Frame pump: repaint at ~60 fps *only* while a screen transition is
+        // running. Spawned once here rather than from `render`, where the
+        // spawned task would not reliably drive repaints.
+        let pump_executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| loop {
-            heartbeat_executor.timer(Duration::from_secs(1)).await;
+            pump_executor.timer(Duration::from_millis(16)).await;
             if this
                 .update(cx, |panel, cx| {
-                    if matches!(
-                        panel.screen,
-                        Screen::Pairing { .. } | Screen::Confirm { .. }
-                    ) {
+                    if panel.transition_start.is_some() {
                         cx.notify();
                     }
                 })
@@ -166,33 +212,32 @@ impl Panel {
         })
         .detach();
 
+        // Start on exactly what the runtime currently wants (usually the
+        // splash on a paired boot) so no stale frame flashes before the first
+        // `set_screen` arrives.
+        let initial = runtime.tick(Instant::now());
         Self {
-            screen: Screen::NoHome,
-            model,
+            screen: initial,
             runtime,
             hits: Vec::new(),
             cache: None,
             pressed: None,
-            show_help: false,
+            prev_image: None,
+            transition_image: None,
+            transition_start: None,
+            last_view: None,
         }
     }
 
-    /// Build (or reuse) the `RenderImage` for the current view.
+    /// Build (or reuse) the `RenderImage` for the current screen.
     fn render_image(&mut self) -> Option<Arc<RenderImage>> {
         let pressed = self.pressed.map(|(action, _)| action);
-        if let Some((screen, cached_pressed, cached_help, image)) = &self.cache {
-            if screen == &self.screen
-                && *cached_pressed == pressed
-                && *cached_help == self.show_help
-            {
+        if let Some((screen, cached_pressed, image)) = &self.cache {
+            if screen == &self.screen && *cached_pressed == pressed {
                 return Some(image.clone());
             }
         }
-        let (canvas, hits) = if self.show_help {
-            screens::help_frame(pressed)
-        } else {
-            screens::frame_for_with(&self.screen, &self.model, pressed)
-        };
+        let (canvas, hits) = screens::frame_for_with(&self.screen, pressed);
         self.hits = hits;
         // GPUI's atlas wants BGRA bytes; its own loader stores them in an
         // `Rgba`-typed buffer after swapping R/B. We feed the BGRA bytes in
@@ -204,7 +249,7 @@ impl Panel {
         )?;
         let frame = image::Frame::new(buffer);
         let image = Arc::new(RenderImage::new(vec![frame]));
-        self.cache = Some((self.screen.clone(), pressed, self.show_help, image.clone()));
+        self.cache = Some((self.screen.clone(), pressed, image.clone()));
         Some(image)
     }
 
@@ -220,31 +265,17 @@ impl Panel {
         };
 
         match action {
+            HitAction::StartPairing => {
+                if let Err(err) = self.runtime.arm_pairing() {
+                    log::warn!("panel: arm_pairing failed: {err:#}");
+                }
+            }
             HitAction::Confirm => {
                 if let Err(err) = self.runtime.confirm_pairing() {
                     log::warn!("panel: confirm_pairing failed: {err:#}");
                 }
             }
-            HitAction::Reject => {
-                if let Err(err) = self.runtime.reject_pairing() {
-                    log::warn!("panel: reject_pairing failed: {err:#}");
-                }
-            }
-            HitAction::Rearm => {
-                if let Err(err) = self.runtime.arm_pairing() {
-                    log::warn!("panel: arm_pairing failed: {err:#}");
-                }
-            }
-            // Open the designed help deck; it replaces the current screen until
-            // the user goes back or the runtime state changes.
-            HitAction::Help => self.show_help = true,
-            HitAction::BackToPairing => self.show_help = false,
-            HitAction::Retry => {
-                if let Err(err) = self.runtime.arm_pairing() {
-                    log::warn!("panel: arm_pairing failed: {err:#}");
-                }
-                self.show_help = false;
-            }
+            HitAction::Decline => self.runtime.reject_pairing(),
         }
 
         // Press feedback: highlight the key for a beat.
@@ -263,8 +294,61 @@ impl Panel {
 }
 
 impl Render for Panel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Detect a screen change and animate it. Pressed highlights also rebuild
+        // the frame, but must not trigger a transition.
+        let view_changed = self.last_view.as_ref() != Some(&self.screen);
+        let old_cache = self.cache.as_ref().map(|c| c.2.clone());
+
+        if view_changed {
+            // Keep the outgoing frame so we can stack it with the incoming one.
+            self.prev_image = old_cache.clone();
+            self.transition_image = None;
+            self.transition_start = Some(Instant::now());
+            self.last_view = Some(self.screen.clone());
+        }
+
         let image = self.render_image();
+
+        // Build the stacked CRT frame once, from the outgoing and incoming
+        // frames. Its pixels live in the stacked image, so release the original
+        // outgoing frame afterwards.
+        if self.transition_start.is_some() && self.transition_image.is_none() {
+            if let (Some(prev), Some(cur)) = (self.prev_image.clone(), image.clone()) {
+                self.transition_image = stacked_frame(&prev, &cur);
+            }
+            self.prev_image = None;
+        }
+
+        // Drop any cached frame that is neither the settled image nor the
+        // stacked transition frame, so the sprite atlas stays small.
+        if let Some(old) = &old_cache {
+            let still_current = image.as_ref().is_some_and(|i| Arc::ptr_eq(i, old));
+            let is_transition = self
+                .transition_image
+                .as_ref()
+                .is_some_and(|t| Arc::ptr_eq(t, old));
+            if !still_current && !is_transition {
+                let _ = window.drop_image(old.clone());
+            }
+        }
+
+        // Finish the transition once it has run its course.
+        let secs = transition_secs();
+        if let Some(elapsed) = self.transition_start.map(|t| t.elapsed().as_secs_f32()) {
+            if elapsed / secs >= 1.0 {
+                if let Some(combined) = self.transition_image.take() {
+                    let _ = window.drop_image(combined);
+                }
+                self.transition_start = None;
+            }
+        }
+
+        let transition_image = self.transition_image.clone();
+        let progress = self
+            .transition_start
+            .map(|t| (t.elapsed().as_secs_f32() / secs).clamp(0.0, 1.0));
+
         // Mouse/pointer input is what makes the desktop ("emulated Pi") panel
         // clickable: the physical device has no pointer events under cage, so it
         // uses the evdev reader instead, but both funnel into `on_touch`.
@@ -280,13 +364,31 @@ impl Render for Panel {
             )
             .child(
                 gpui::canvas(
-                    move |_bounds, _window, _cx| image,
-                    move |bounds, image, window, _cx| {
-                        if let Some(image) = image {
-                            let corners = Corners::all(gpui::px(0.0));
-                            if let Err(err) = window.paint_image(bounds, corners, image, 0, false) {
-                                log::warn!("panel: paint_image failed: {err:#}");
+                    move |_bounds, _window, _cx| (image, transition_image, progress),
+                    move |bounds, (image, transition_image, progress), window, _cx| {
+                        // On the device (kiosk, no mouse) hide the pointer: cage
+                        // lacks `cursor-shape-v1`, so GPUI would otherwise set its
+                        // own client cursor that overrides the blank compositor
+                        // theme. The desktop emulator leaves this unset so the
+                        // pointer stays usable for clicking.
+                        if hide_cursor() {
+                            window.set_window_cursor_style(CursorStyle::None);
+                        }
+                        let corners = Corners::all(gpui::px(0.0));
+                        match (image, transition_image, progress) {
+                            (Some(_image), Some(combined), Some(p)) if p < 1.0 => {
+                                if let Err(err) = window.paint_crt_transition(bounds, combined, p) {
+                                    log::warn!("panel: paint_crt_transition failed: {err:#}");
+                                }
                             }
+                            (Some(image), _, _) => {
+                                if let Err(err) =
+                                    window.paint_image(bounds, corners, image, 0, false)
+                                {
+                                    log::warn!("panel: paint_image failed: {err:#}");
+                                }
+                            }
+                            _ => {}
                         }
                     },
                 )

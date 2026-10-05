@@ -44,11 +44,11 @@ class ScreensightText(ScreensightEntity, TextEntity):
     @property
     def native_value(self) -> str | None:
         """Return the text the device last reported or accepted."""
-        return self._connection.text
+        return self._connection.value("text")
 
     async def async_set_value(self, value: str) -> None:
-        """Push new text to the device."""
-        await self._connection.async_set_text(value)
+        """Push new text to the device's ``text`` dashboard value."""
+        await self._connection.async_set_value("text", value)
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to connection updates once the entity is live."""
