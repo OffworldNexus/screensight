@@ -138,6 +138,8 @@ class ScreensightConfigFlow(ConfigFlow, domain=DOMAIN):
             self._hosts = [str(discovery_info.ip_address)]
         self._model = properties.get("model")
         self._version = properties.get("version")
+        # Show the device's own name in Home Assistant's discovery card.
+        self.context["title_placeholders"] = {"name": self._display_name}
         return await self.async_step_pair()
 
     # -- repair flows -------------------------------------------------------

@@ -6,4 +6,4 @@ Feature: Displaying text on a paired Screensight device
   Scenario: Setting the Display text entity pushes a frame to the device
     Given a paired Screensight device is connected
     When I set the Display text entity to "Hello 🌧"
-    Then the device receives a set_text frame with "Hello 🌧"
+    Then the device receives a "text" value of "Hello 🌧"

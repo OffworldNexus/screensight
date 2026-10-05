@@ -20,6 +20,8 @@ from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from zeroconf import ServiceStateChange
+from zeroconf.asyncio import AsyncServiceBrowser
 
 from .const import (
     CONF_HOST,
@@ -30,10 +32,10 @@ from .const import (
     SERVICE_TYPE,
     SIGNAL_STATE_UPDATED,
     TYPE_ERROR,
-    TYPE_GET_STATE,
     TYPE_PING,
     TYPE_PONG,
-    TYPE_SET_TEXT,
+    TYPE_SET_STATE,
+    TYPE_SET_VALUE,
     TYPE_STATE,
     WS_PATH,
 )
@@ -82,19 +84,27 @@ class ScreensightConnection:
         self._stopping = False
         self._connected = False
         self._failures = 0
-        self._text: str | None = None
+        self._values: dict[str, str] = {}
+        self._desired: dict[str, str] = {}
         self._selected = False
         self._listeners: set[Callable[[], None]] = set()
         self._write_lock = asyncio.Lock()
+        # Signalled when mDNS says our device is back; wakes the retry sleep.
+        self._wake = asyncio.Event()
+        self._browser: AsyncServiceBrowser | None = None
         # Injectable so tests can drive the reconnect loop without sleeping.
-        self._sleep = asyncio.sleep
+        self._sleep = self._async_sleep_with_wake
 
     # -- public API ---------------------------------------------------------
 
     @property
-    def text(self) -> str | None:
-        """Return the last text pushed by (or to) the device."""
-        return self._text
+    def values(self) -> dict[str, str]:
+        """Return a copy of the device's dashboard values."""
+        return dict(self._values)
+
+    def value(self, key: str) -> str | None:
+        """Return one dashboard value, if the device has set it."""
+        return self._values.get(key)
 
     @property
     def selected(self) -> bool:
@@ -127,6 +137,7 @@ class ScreensightConnection:
         if self._task is not None:
             return
         self._stopping = False
+        self._start_browser()
         self._task = self.hass.async_create_background_task(
             self._run(), "screensight-websocket"
         )
@@ -139,18 +150,23 @@ class ScreensightConnection:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        browser, self._browser = self._browser, None
+        if browser is not None:
+            with contextlib.suppress(Exception):
+                await browser.async_cancel()
         await self._close_ws()
         self._set_connected(False)
 
-    async def async_set_text(self, text: str) -> None:
-        """Send ``set_text`` and optimistically mirror it locally."""
+    async def async_set_value(self, key: str, value: str) -> None:
+        """Send ``set_value`` and optimistically mirror it locally."""
         async with self._write_lock:
             ws = self._ws
             if not self._connected or ws is None:
-                msg = "Screensight device is not connected; cannot set text"
+                msg = "Screensight device is not connected; cannot set value"
                 raise HomeAssistantError(msg)
-            await ws.send_json({"type": TYPE_SET_TEXT, "text": text})
-            self._text = text
+            await ws.send_json({"type": TYPE_SET_VALUE, "key": key, "value": value})
+            self._desired[key] = value
+            self._values[key] = value
             self._notify()
 
     # -- connection loop ----------------------------------------------------
@@ -191,7 +207,12 @@ class ScreensightConnection:
                 self._ws = ws
                 self._failures = 0
                 self._set_connected(True)
-                await ws.send_json({"type": TYPE_GET_STATE})
+                # Re-send the full state we hold so a device that rebooted or
+                # missed frames converges on Home Assistant's values.
+                if self._desired:
+                    await ws.send_json(
+                        {"type": TYPE_SET_STATE, "values": dict(self._desired)}
+                    )
                 await self._async_read_loop(ws)
         finally:
             self._ws = None
@@ -226,7 +247,7 @@ class ScreensightConnection:
         """Apply one decoded device frame to the cached state."""
         message_type = message.get("type")
         if message_type == TYPE_STATE:
-            self._text = message.get("text")
+            self._values = dict(message.get("values", {}))
             self._selected = bool(message.get("selected", False))
             self._notify()
         elif message_type == TYPE_PONG:
@@ -263,6 +284,48 @@ class ScreensightConnection:
         self._host = host
         self._update_entry_host(host)
         return host
+
+    # -- mDNS-driven reconnect ----------------------------------------------
+
+    @callback
+    def _start_browser(self) -> None:
+        """Browse our service so the device's return wakes the retry sleep."""
+        if "zeroconf" not in self.hass.config.components:
+            return
+        try:
+            azc = zeroconf_component.async_get_async_zeroconf(self.hass)
+        except Exception:
+            _LOGGER.debug("Screensight: zeroconf unavailable", exc_info=True)
+            return
+        _LOGGER.debug("Screensight: watching %s for reconnects", SERVICE_TYPE)
+        self._browser = AsyncServiceBrowser(
+            azc.zeroconf, SERVICE_TYPE, handlers=[self._async_on_service]
+        )
+
+    @callback
+    def _async_on_service(
+        self,
+        zeroconf: Any,
+        service_type: str,
+        name: str,
+        state_change: ServiceStateChange,
+    ) -> None:
+        """Wake the reconnect loop when our device announces itself again."""
+        if state_change not in (ServiceStateChange.Added, ServiceStateChange.Updated):
+            return
+        if self._service_name is not None and name != self._service_name:
+            return
+        _LOGGER.debug("Screensight: %s announced; waking reconnect", name)
+        self._wake.set()
+
+    async def _async_sleep_with_wake(self, delay: float) -> None:
+        """Sleep for ``delay`` seconds, waking early on an mDNS announcement."""
+        self._wake.clear()
+        try:
+            async with asyncio.timeout(delay):
+                await self._wake.wait()
+        except TimeoutError:
+            pass
 
     # -- helpers ------------------------------------------------------------
 

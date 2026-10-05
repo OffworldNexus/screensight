@@ -13,6 +13,9 @@ members = ["device"]
 [patch.crates-io]
 xattr = { path = "vendor/xattr" }
 blade-graphics = { path = "vendor/blade-graphics" }
+# Screensight vendors gpui to add a GPU CRT screen-transition shader (see
+# `paint_crt_transition` and the `crt` branch in `shaders.wgsl`).
+gpui = { path = "vendor/gpui" }
 
 [profile.release]
 opt-level = 3

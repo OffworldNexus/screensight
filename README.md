@@ -26,7 +26,7 @@ all 800×480 device screens, bundled fonts).
 │  cage (Wayland kiosk)     │                                      │  custom_components/   │
 │   └─ screensightd         │        WebSocket  /ws  (Bearer)      │   screensight         │
 │        • identity/store   │  ◄───────────────────────────────►   │   • zeroconf config   │
-│        • WS server        │        heartbeat + set_text          │     flow              │
+│        • WS server        │        heartbeat + set_value         │     flow              │
 │        • mDNS (Avahi)     │                                      │   • connection mgr    │
 │        • CPU rasteriser   │                                      │   • text entity       │
 │  screensight (CLI)        │                                      └──────────────────────┘
@@ -37,16 +37,18 @@ all 800×480 device screens, bundled fonts).
   keys `id`, `model`, `api` and `version` (plus `pairing=1` only while the
   pairing window is open). Home Assistant discovers it with no manual IP entry.
 * **Pairing** — the panel draws a 6-digit code. The user types it into the Home
-  Assistant config flow; the code is verified *on the device*. The device then
-  asks "Is this your home?" and the user confirms on the touch panel. Only then
-  is a long-lived token issued over the same WebSocket. The code is never
-  advertised over mDNS.
+  Assistant config flow; the code is verified *on the device*. The panel then
+  names the Home Assistant asking to pair and the user approves on the touch
+  panel. Only then is a long-lived token issued over the same WebSocket. The
+  code is never advertised over mDNS.
 * **Multi-pair** — the device can be paired with several Home Assistant
   instances at once (for example a dev and a prod instance). Each keeps its own
   display state; only the selected one is shown. `screensight select <id>`
   switches which instance drives the panel.
 * **Link** — a persistent WebSocket with an application-level heartbeat. Home
-  Assistant pushes `set_text`; the device renders it full-screen within a frame.
+  Assistant pushes per-key dashboard values (`set_value`, or a full `set_state`
+  on reconnect); the device stores them per paired instance and renders the
+  selected one. Components subscribe to the keys they need (see `state.rs`).
 
 The renderer CPU-rasterises the whole 800×480 frame (fonts, Unicode shaping,
 emoji fallback) and blits it through GPUI as a single image. This deliberately
@@ -58,7 +60,7 @@ avoids GPUI's glyph-atlas text layer, which hangs the Pi's V3D GPU.
 
 ```
 device/                     Rust device daemon + `screensight` CLI
-  src/                      identity, store, pairing, runtime, WS server,
+  src/                      db (SeaORM), state, pairing, runtime, WS server,
                             control socket, mDNS, rasteriser, GPUI panel
   assets/fonts/             bundled Silkscreen / VT323 / JetBrains Mono + fallbacks
 custom_components/screensight/   Home Assistant integration (HACS-native)
@@ -208,9 +210,9 @@ make ha-test     # uv run pytest  (unit + BDD, Allure results in allure-results/
 make ha-bdd      # only the @bdd scenarios
 ```
 
-* Rust: unit tests across identity, persistence, pairing/rate limiting, display
-  state and runtime, plus WebSocket end-to-end tests (pairing → confirmation →
-  token → `set_text`) in `device/tests/`.
+* Rust: unit tests across identity, the SQLite store, the state manager,
+  pairing/rate limiting and the runtime, plus WebSocket end-to-end tests
+  (pairing → approval → token → `set_value`) in `device/tests/`.
 * Python: config-flow, connection and text-entity tests, plus pytest-bdd
   scenarios with Allure reporting.
 * GitHub Actions: `.github/workflows/rust.yml` (fmt, clippy, tests, release

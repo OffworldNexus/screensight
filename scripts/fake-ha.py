@@ -10,8 +10,8 @@ Two modes:
 
       uv run scripts/fake-ha.py pair --code 123456
 
-    After the device shows "request received", tap "Yes · pair this display"
-    on the panel; the script prints the token.
+    After the device shows the confirm screen, tap "Pair" on the panel; the
+    script prints the token.
 
   Push text (already paired):
 
@@ -51,7 +51,7 @@ async def pair(host: str, port: int, code: str, device_id: str | None) -> None:
             kind = message.get("type")
             print(f"<- {kind}: {message}")
             if kind == "pair_pending":
-                print(">>> tap 'Yes · pair this display' on the panel now <<<")
+                print(">>> tap 'Pair' on the panel now <<<")
             elif kind == "pair_success":
                 print(f"token = {message['token']}")
                 return
@@ -65,16 +65,13 @@ async def text(host: str, port: int, token: str, value: str) -> None:
     ) as ws:
         # The device pushes its current state as soon as we connect.
         print(f"<- {await ws.recv()}")
-        await ws.send(json.dumps({"type": "set_text", "text": value}))
-        await ws.send(json.dumps({"type": "get_state"}))
-        # Read replies until we see the state carrying our new text (the device
-        # also answers the get_state we sent, so there may be two frames).
+        await ws.send(json.dumps({"type": "set_value", "key": "text", "value": value}))
+        # Read replies until we see the state carrying our new text.
         while True:
             message = json.loads(await ws.recv())
-            kind = message.get("type")
-            if kind == "state":
+            if message.get("type") == "state":
                 print(f"<- {message}")
-                if message.get("text") == value:
+                if message.get("values", {}).get("text") == value:
                     return
 
 

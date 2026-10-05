@@ -1,13 +1,17 @@
 //! Screen compositor: turns a [`Screen`] into a rasterised [`FrameCanvas`] and
 //! the touch hit regions for its keys.
 //!
-//! The visuals follow the Screensight "06 · Device UI" design: a dark sand
-//! deck, a Silkscreen kicker/step rail, VT323 display type and JetBrains Mono
-//! body copy. All families are bundled and loaded by [`crate::raster`].
+//! The device has exactly four faces — idle, pairing, confirm and the paired
+//! dashboard — and only three actions between them (start, confirm, decline).
+//! There is deliberately no step rail, help deck or other chrome: what the
+//! device needs to say is said once, plainly.
+
+use std::collections::BTreeMap;
+
+use cosmic_text::Weight;
 
 use crate::raster::{Color, FrameCanvas, TextAlign, TextStyle};
 use crate::runtime::Screen;
-use cosmic_text::Weight;
 
 /// Deck background.
 pub const BG: Color = Color::hex(0x141110);
@@ -21,21 +25,16 @@ pub const SAND_50: Color = Color::hex(0xfaf7f2);
 pub const PLUMAGE_500: Color = Color::hex(0x0bb2b3);
 /// gorget-500.
 pub const GORGET_500: Color = Color::hex(0xf2a900);
-/// crown-500.
-#[allow(dead_code)]
-pub const CROWN_500: Color = Color::hex(0xc9541f);
-/// Divider.
-pub const DIVIDER: Color = Color::hex(0x514943);
 
-/// Silkscreen family name as loaded from the bundled font.
-pub const SILKSCREEN: &str = "Silkscreen";
 /// VT323 family name as loaded from the bundled font.
 pub const VT323: &str = "VT323";
 /// JetBrains Mono family name as loaded from the bundled font.
 pub const JETBRAINS_MONO: &str = "JetBrains Mono";
 
-/// The kicker used on the pairing deck.
-const KICKER: &str = "SCREENSIGHT / FIRST CONNECTION";
+/// Horizontal content margin.
+const MARGIN: f32 = 48.0;
+/// Content width between the margins.
+const CONTENT_W: f32 = crate::raster::WIDTH as f32 - MARGIN * 2.0;
 
 /// A rectangular touch target in frame pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,18 +60,12 @@ impl HitRegion {
 /// What a tap on a hit region should do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitAction {
-    /// Confirm the pending pairing.
+    /// Open the pairing window ("Start pairing").
+    StartPairing,
+    /// Approve the pending pairing ("Pair").
     Confirm,
-    /// Decline the pending pairing ("Not my home").
-    Reject,
-    /// Re-arm the pairing window ("Get a new code").
-    Rearm,
-    /// Open the connection-help screen.
-    Help,
-    /// Return from the help screen to the pairing screen.
-    BackToPairing,
-    /// Retry pairing from the help screen (re-arms the window).
-    Retry,
+    /// Decline the pending pairing ("Cancel").
+    Decline,
 }
 
 fn ts<'a>(family: &'a str, px: f32, color: Color, weight: Weight) -> TextStyle<'a> {
@@ -87,25 +80,28 @@ fn ts<'a>(family: &'a str, px: f32, color: Color, weight: Weight) -> TextStyle<'
     }
 }
 
-/// Paint the shared deck chrome: background, kicker, step, title and divider.
-fn deck(canvas: &mut FrameCanvas, kicker: &str, step: &str, title: &str) {
-    canvas.fill(BG);
-    if !kicker.is_empty() {
-        let mut s = ts(SILKSCREEN, 12.0, PLUMAGE_500, Weight::NORMAL);
-        s.line_height = 16.0;
-        canvas.text(28.0, 22.0, kicker, &s);
-    }
-    if !step.is_empty() {
-        let mut s = ts(JETBRAINS_MONO, 12.0, SAND_300, Weight::NORMAL);
-        s.line_height = 16.0;
-        s.max_width = 772.0;
-        s.align = TextAlign::Right;
-        canvas.text(0.0, 22.0, step, &s);
-    }
-    let mut t = ts(VT323, 56.0, SAND_50, Weight::NORMAL);
-    t.line_height = 56.0;
-    canvas.text(28.0, 65.0, title, &t);
-    canvas.rect(28, 132, 744, 2, DIVIDER);
+/// A screen title.
+fn title(canvas: &mut FrameCanvas, text: &str) {
+    let mut s = ts(VT323, 48.0, SAND_50, Weight::NORMAL);
+    s.line_height = 52.0;
+    s.max_width = CONTENT_W;
+    canvas.text(MARGIN, 64.0, text, &s);
+}
+
+/// A body line under the title.
+fn body(canvas: &mut FrameCanvas, y: f32, text: &str) {
+    let mut s = ts(JETBRAINS_MONO, 18.0, SAND_300, Weight::NORMAL);
+    s.line_height = 26.0;
+    s.max_width = CONTENT_W;
+    canvas.text(MARGIN, y, text, &s);
+}
+
+/// A quiet status line (never a button).
+fn status(canvas: &mut FrameCanvas, y: f32, text: &str) {
+    let mut s = ts(JETBRAINS_MONO, 15.0, PLUMAGE_500, Weight::NORMAL);
+    s.line_height = 20.0;
+    s.max_width = CONTENT_W;
+    canvas.text(MARGIN, y, text, &s);
 }
 
 /// Draw one key and return its hit region.
@@ -131,10 +127,10 @@ fn key(
         base
     };
     canvas.rounded_rect(x as i32, y as i32, w as i32, h as i32, 3.0, bg);
-    let mut s = ts(JETBRAINS_MONO, 13.0, fg, Weight::NORMAL);
-    s.line_height = 18.0;
+    let mut s = ts(JETBRAINS_MONO, 15.0, fg, Weight::NORMAL);
+    s.line_height = 20.0;
     s.max_width = w - 24.0;
-    canvas.text(x + 12.0, y + 17.0, label, &s);
+    canvas.text(x + 12.0, y + 18.0, label, &s);
     HitRegion { x, y, w, h }
 }
 
@@ -162,235 +158,132 @@ fn format_code(code: &str) -> String {
 
 /// Compose the frame for `screen`, without press feedback.
 #[must_use]
-pub fn frame_for(screen: &Screen, model: &str) -> (FrameCanvas, Vec<(HitRegion, HitAction)>) {
-    frame_for_with(screen, model, None)
+pub fn frame_for(screen: &Screen) -> (FrameCanvas, Vec<(HitRegion, HitAction)>) {
+    frame_for_with(screen, None)
 }
 
 /// Compose the frame for `screen`, optionally highlighting a pressed key.
 #[must_use]
 pub fn frame_for_with(
     screen: &Screen,
-    model: &str,
     pressed: Option<HitAction>,
 ) -> (FrameCanvas, Vec<(HitRegion, HitAction)>) {
     let mut canvas = FrameCanvas::new();
     let mut hits: Vec<(HitRegion, HitAction)> = Vec::new();
     match screen {
-        Screen::Unpaired | Screen::NoHome => no_home(&mut canvas),
-        Screen::Pairing { code } => pairing(&mut canvas, model, code, pressed, &mut hits),
-        Screen::Confirm { code, ha_name } => {
-            confirm(&mut canvas, code, ha_name, pressed, &mut hits)
-        }
-        Screen::Timeout => timeout(&mut canvas, pressed, &mut hits),
-        Screen::Display { text } => display(&mut canvas, text),
+        Screen::Splash { name } => splash(&mut canvas, name),
+        Screen::Idle => idle(&mut canvas, pressed, &mut hits),
+        Screen::Pairing { code, name } => pairing(&mut canvas, name, code),
+        Screen::Confirm { ha_name } => confirm(&mut canvas, ha_name, pressed, &mut hits),
+        Screen::Dashboard { values } => dashboard(&mut canvas, values),
     }
     (canvas, hits)
 }
 
-/// The no-home / unpaired state.
-fn no_home(canvas: &mut FrameCanvas) {
-    deck(canvas, "", "SETUP / WAIT", "No home found yet.");
-    let mut body = ts(JETBRAINS_MONO, 16.0, SAND_300, Weight::NORMAL);
-    body.line_height = 24.0;
-    body.max_width = 744.0;
-    canvas.text(
-        28.0,
-        216.0,
-        "Open the Screensight integration in your home.",
-        &body,
-    );
+/// Boot splash: paired, waiting to hear from Home Assistant.
+fn splash(canvas: &mut FrameCanvas, name: &str) {
+    canvas.fill(BG);
+    let mut title = ts(VT323, 48.0, SAND_50, Weight::NORMAL);
+    title.line_height = 52.0;
+    title.max_width = CONTENT_W;
+    title.align = TextAlign::Center;
+    canvas.text(MARGIN, 176.0, name, &title);
+
+    let mut hint = ts(JETBRAINS_MONO, 15.0, PLUMAGE_500, Weight::NORMAL);
+    hint.line_height = 20.0;
+    hint.max_width = CONTENT_W;
+    hint.align = TextAlign::Center;
+    canvas.text(MARGIN, 244.0, "Starting\u{2026}", &hint);
 }
 
-/// The pairing window state.
-fn pairing(
+/// Not paired, and no pairing window open. One action: start pairing.
+fn idle(
     canvas: &mut FrameCanvas,
-    model: &str,
-    code: &str,
     pressed: Option<HitAction>,
     hits: &mut Vec<(HitRegion, HitAction)>,
 ) {
-    deck(canvas, KICKER, "SETUP / 01", "A small window on your home.");
-
-    let mut lead = ts(JETBRAINS_MONO, 23.0, SAND_50, Weight::BOLD);
-    lead.line_height = 30.0;
-    canvas.text(28.0, 160.0, "Pair this display", &lead);
-
-    let mut step = ts(JETBRAINS_MONO, 16.0, SAND_50, Weight::NORMAL);
-    step.line_height = 24.0;
-    step.max_width = 500.0;
-    canvas.text(28.0, 213.0, "1  Open Home Assistant.", &step);
-    canvas.text(28.0, 247.0, "2  Add the Screensight integration.", &step);
-    canvas.text(
-        28.0,
-        281.0,
-        "3  Select this display and confirm the code.",
-        &step,
+    canvas.fill(BG);
+    title(canvas, "Not paired");
+    body(
+        canvas,
+        150.0,
+        "This display isn't paired with Home Assistant yet.",
     );
-
-    let mut label = ts(SILKSCREEN, 12.0, GORGET_500, Weight::NORMAL);
-    label.line_height = 16.0;
-    canvas.text(544.0, 188.0, "PAIRING CODE", &label);
-
-    let mut code_style = ts(VT323, 48.0, GORGET_500, Weight::NORMAL);
-    code_style.line_height = 52.0;
-    canvas.text(544.0, 223.0, &format_code(code), &code_style);
-
-    let mut device = ts(JETBRAINS_MONO, 13.0, SAND_300, Weight::NORMAL);
-    device.line_height = 18.0;
-    device.max_width = 228.0;
-    canvas.text(544.0, 346.0, &format!("Device: {model}"), &device);
-
-    let mut waiting = ts(JETBRAINS_MONO, 12.0, PLUMAGE_500, Weight::NORMAL);
-    waiting.line_height = 16.0;
-    waiting.max_width = 228.0;
-    canvas.text(
-        544.0,
-        371.0,
-        "Local network connected · waiting for your home",
-        &waiting,
-    );
-
     let region = key(
         canvas,
-        28.0,
-        410.0,
-        300.0,
-        52.0,
-        "Connection help",
-        false,
-        pressed == Some(HitAction::Help),
+        MARGIN,
+        376.0,
+        260.0,
+        56.0,
+        "Start pairing",
+        true,
+        pressed == Some(HitAction::StartPairing),
     );
-    hits.push((region, HitAction::Help));
+    hits.push((region, HitAction::StartPairing));
 }
 
-/// The confirm-on-panel state.
+/// The pairing window: the device's name and the code Home Assistant must be
+/// told. No actions.
+fn pairing(canvas: &mut FrameCanvas, name: &str, code: &str) {
+    canvas.fill(BG);
+    title(canvas, name);
+    body(canvas, 140.0, "Enter this code in Home Assistant to pair:");
+
+    let mut code_style = ts(VT323, 96.0, GORGET_500, Weight::NORMAL);
+    code_style.line_height = 100.0;
+    canvas.text(MARGIN, 196.0, &format_code(code), &code_style);
+
+    status(canvas, 404.0, "Waiting for Home Assistant\u{2026}");
+}
+
+/// A Home Assistant typed the correct code; ask the user to approve it.
 fn confirm(
     canvas: &mut FrameCanvas,
-    code: &str,
     ha_name: &str,
     pressed: Option<HitAction>,
     hits: &mut Vec<(HitRegion, HitAction)>,
 ) {
-    deck(canvas, KICKER, "SETUP / 02", "Is this your home?");
-
-    let mut received = ts(SILKSCREEN, 12.0, PLUMAGE_500, Weight::NORMAL);
-    received.line_height = 16.0;
-    canvas.text(28.0, 163.0, "PAIRING REQUEST RECEIVED", &received);
-
-    let mut name = ts(JETBRAINS_MONO, 25.0, SAND_50, Weight::BOLD);
-    name.line_height = 32.0;
-    name.max_width = 744.0;
-    canvas.text(28.0, 204.0, ha_name, &name);
-
-    let mut body = ts(JETBRAINS_MONO, 16.0, SAND_300, Weight::NORMAL);
-    body.line_height = 24.0;
-    body.max_width = 744.0;
-    canvas.text(
-        28.0,
-        256.0,
-        "Confirm that the same code appears there.",
-        &body,
+    canvas.fill(BG);
+    title(canvas, "Pair this display?");
+    body(
+        canvas,
+        150.0,
+        "Home Assistant wants to pair with this display:",
     );
 
-    let mut code_style = ts(VT323, 64.0, GORGET_500, Weight::NORMAL);
-    code_style.line_height = 68.0;
-    canvas.text(28.0, 292.0, &format_code(code), &code_style);
+    let mut name = ts(JETBRAINS_MONO, 30.0, SAND_50, Weight::BOLD);
+    name.line_height = 38.0;
+    name.max_width = CONTENT_W;
+    canvas.text(MARGIN, 190.0, ha_name, &name);
 
     let yes = key(
         canvas,
-        28.0,
-        410.0,
-        352.0,
-        52.0,
-        "Yes · pair this display",
+        MARGIN,
+        376.0,
+        200.0,
+        56.0,
+        "Pair",
         true,
         pressed == Some(HitAction::Confirm),
     );
     hits.push((yes, HitAction::Confirm));
     let no = key(
         canvas,
-        542.0,
-        410.0,
-        230.0,
-        52.0,
-        "Not my home",
+        MARGIN + 216.0,
+        376.0,
+        160.0,
+        56.0,
+        "Cancel",
         false,
-        pressed == Some(HitAction::Reject),
+        pressed == Some(HitAction::Decline),
     );
-    hits.push((no, HitAction::Reject));
+    hits.push((no, HitAction::Decline));
 }
 
-/// The expired pairing window state.
-fn timeout(
-    canvas: &mut FrameCanvas,
-    pressed: Option<HitAction>,
-    hits: &mut Vec<(HitRegion, HitAction)>,
-) {
-    deck(
-        canvas,
-        KICKER,
-        "SETUP / RETRY",
-        "Still waiting for your home.",
-    );
-
-    let mut expired = ts(SILKSCREEN, 12.0, GORGET_500, Weight::NORMAL);
-    expired.line_height = 16.0;
-    canvas.text(28.0, 167.0, "PAIRING REQUEST TIMED OUT", &expired);
-
-    let mut headline = ts(JETBRAINS_MONO, 20.0, SAND_50, Weight::NORMAL);
-    headline.line_height = 28.0;
-    headline.max_width = 744.0;
-    canvas.text(28.0, 213.0, "The example code has expired.", &headline);
-
-    let mut body = ts(JETBRAINS_MONO, 14.0, SAND_300, Weight::NORMAL);
-    body.line_height = 20.0;
-    body.max_width = 744.0;
-    canvas.text(
-        28.0,
-        266.0,
-        "Keep the display and home on the same network.",
-        &body,
-    );
-    canvas.text(28.0, 294.0, "Then request a new code and try again.", &body);
-
-    let rearm = key(
-        canvas,
-        28.0,
-        410.0,
-        300.0,
-        52.0,
-        "Get a new code",
-        true,
-        pressed == Some(HitAction::Rearm),
-    );
-    hits.push((rearm, HitAction::Rearm));
-    let help = key(
-        canvas,
-        542.0,
-        410.0,
-        230.0,
-        52.0,
-        "Connection help",
-        false,
-        pressed == Some(HitAction::Help),
-    );
-    hits.push((help, HitAction::Help));
-}
-
-/// The paired display state.
-fn display(canvas: &mut FrameCanvas, text: &Option<String>) {
+/// The paired dashboard.
+fn dashboard(canvas: &mut FrameCanvas, values: &BTreeMap<String, String>) {
     canvas.fill(BG);
-    let mut kicker = ts(SILKSCREEN, 12.0, PLUMAGE_500, Weight::NORMAL);
-    kicker.line_height = 16.0;
-    canvas.text(28.0, 22.0, "SCREENSIGHT", &kicker);
-
-    let mut step = ts(JETBRAINS_MONO, 12.0, SAND_300, Weight::NORMAL);
-    step.line_height = 16.0;
-    step.max_width = 772.0;
-    step.align = TextAlign::Right;
-    canvas.text(0.0, 22.0, "DISPLAY", &step);
-
-    match text {
+    match values.get("text").map(String::as_str) {
         Some(text) if !text.is_empty() => {
             let large = text.chars().count() <= 42;
             let (family, px, line_height) = if large {
@@ -400,96 +293,23 @@ fn display(canvas: &mut FrameCanvas, text: &Option<String>) {
             };
             let mut style = ts(family, px, SAND_50, Weight::NORMAL);
             style.line_height = line_height;
-            style.max_width = 744.0;
-            style.align = TextAlign::Left;
+            style.max_width = CONTENT_W;
+            style.align = TextAlign::Center;
             let (_, h) = canvas.measure(text, &style);
-            let y = ((crate::raster::HEIGHT as f32 - h) / 2.0).max(150.0);
-            canvas.text(28.0, y, text, &style);
+            let y = ((crate::raster::HEIGHT as f32 - h) / 2.0).max(48.0);
+            canvas.text(MARGIN, y, text, &style);
         }
         _ => {
-            let rest = "3615 SCREENSIGHT / Rien à signaler";
             let mut style = ts(JETBRAINS_MONO, 16.0, SAND_300, Weight::NORMAL);
             style.line_height = 24.0;
-            style.max_width = 744.0;
+            style.max_width = CONTENT_W;
             style.align = TextAlign::Center;
-            let (_, h) = canvas.measure(rest, &style);
-            let y = ((crate::raster::HEIGHT as f32 - h) / 2.0).max(150.0);
-            canvas.text(28.0, y, rest, &style);
+            let placeholder = "Waiting for Home Assistant\u{2026}";
+            let (_, h) = canvas.measure(placeholder, &style);
+            let y = ((crate::raster::HEIGHT as f32 - h) / 2.0).max(48.0);
+            canvas.text(MARGIN, y, placeholder, &style);
         }
     }
-}
-
-/// The connection-help deck (Figma `18:1888`). Returned as its own frame so the
-/// panel can overlay it without changing the runtime's pairing state.
-#[must_use]
-pub fn help_frame(pressed: Option<HitAction>) -> (FrameCanvas, Vec<(HitRegion, HitAction)>) {
-    let mut canvas = FrameCanvas::new();
-    let mut hits = Vec::new();
-    deck(
-        &mut canvas,
-        KICKER,
-        "SETUP / HELP",
-        "Let's make the connection.",
-    );
-
-    let items: [(&str, &str, &str); 3] = [
-        (
-            "01",
-            "Same local network",
-            "Display and home server on the same network.",
-        ),
-        (
-            "02",
-            "Screensight integration",
-            "Install and add the integration; select this display.",
-        ),
-        (
-            "03",
-            "Still not discovered?",
-            "Check connectivity and discovery permissions.",
-        ),
-    ];
-    let mut y = 162.0;
-    for (number, title, body) in items {
-        let mut n = ts(VT323, 30.0, GORGET_500, Weight::NORMAL);
-        n.line_height = 34.0;
-        canvas.text(28.0, y, number, &n);
-
-        let mut t = ts(JETBRAINS_MONO, 17.0, SAND_50, Weight::BOLD);
-        t.line_height = 22.0;
-        t.max_width = 660.0;
-        canvas.text(86.0, y, title, &t);
-
-        let mut b = ts(JETBRAINS_MONO, 12.0, SAND_300, Weight::NORMAL);
-        b.line_height = 16.0;
-        b.max_width = 660.0;
-        canvas.text(86.0, y + 29.0, body, &b);
-        y += 73.0;
-    }
-
-    let back = key(
-        &mut canvas,
-        28.0,
-        410.0,
-        300.0,
-        52.0,
-        "← Back to pairing",
-        false,
-        pressed == Some(HitAction::BackToPairing),
-    );
-    hits.push((back, HitAction::BackToPairing));
-    let retry = key(
-        &mut canvas,
-        542.0,
-        410.0,
-        230.0,
-        52.0,
-        "Retry connection",
-        true,
-        pressed == Some(HitAction::Retry),
-    );
-    hits.push((retry, HitAction::Retry));
-    (canvas, hits)
 }
 
 #[cfg(test)]
@@ -498,27 +318,37 @@ mod tests {
 
     fn sample_screens() -> Vec<Screen> {
         vec![
-            Screen::Unpaired,
-            Screen::NoHome,
+            Screen::Splash {
+                name: "Brave Otter".to_owned(),
+            },
+            Screen::Idle,
             Screen::Pairing {
                 code: "123456".to_owned(),
+                name: "Brave Otter".to_owned(),
             },
             Screen::Confirm {
-                code: "123456".to_owned(),
                 ha_name: "My home".to_owned(),
             },
-            Screen::Timeout,
-            Screen::Display {
-                text: Some("Hello world".to_owned()),
+            Screen::Dashboard {
+                values: BTreeMap::from([("text".to_owned(), "Hello world".to_owned())]),
             },
-            Screen::Display { text: None },
+            Screen::Dashboard {
+                values: BTreeMap::new(),
+            },
         ]
+    }
+
+    fn find(hits: &[(HitRegion, HitAction)], action: HitAction) -> HitRegion {
+        hits.iter()
+            .find(|(_, a)| *a == action)
+            .map(|(r, _)| *r)
+            .unwrap_or_else(|| panic!("missing hit region for {action:?}"))
     }
 
     #[test]
     fn every_screen_renders_a_full_frame_with_content() {
         for screen in sample_screens() {
-            let (canvas, _hits) = frame_for(&screen, "Screensight Studio");
+            let (canvas, _hits) = frame_for(&screen);
             assert_eq!(
                 canvas.frame().len(),
                 crate::raster::WIDTH * crate::raster::HEIGHT * 4
@@ -532,20 +362,36 @@ mod tests {
     }
 
     #[test]
-    fn confirm_screen_hit_regions_map_to_actions() {
-        let screen = Screen::Confirm {
-            code: "123456".to_owned(),
+    fn only_idle_and_confirm_offer_actions() {
+        assert!(frame_for(&Screen::Idle)
+            .1
+            .iter()
+            .any(|(_, a)| *a == HitAction::StartPairing));
+        assert!(frame_for(&Screen::Pairing {
+            code: "123456".into(),
+            name: "Brave Otter".into()
+        })
+        .1
+        .is_empty());
+        let (_, confirm) = frame_for(&Screen::Confirm {
+            ha_name: "Home".into(),
+        });
+        assert!(confirm.iter().any(|(_, a)| *a == HitAction::Confirm));
+        assert!(confirm.iter().any(|(_, a)| *a == HitAction::Decline));
+        assert!(frame_for(&Screen::Dashboard {
+            values: BTreeMap::new()
+        })
+        .1
+        .is_empty());
+    }
+
+    #[test]
+    fn confirm_hit_regions_do_not_overlap() {
+        let (_, hits) = frame_for(&Screen::Confirm {
             ha_name: "My home".to_owned(),
-        };
-        let (_, hits) = frame_for(&screen, "Test");
-        let find = |action: HitAction| {
-            hits.iter()
-                .find(|(_, a)| *a == action)
-                .map(|(r, _)| *r)
-                .unwrap_or_else(|| panic!("missing hit region for {action:?}"))
-        };
-        let yes = find(HitAction::Confirm);
-        let no = find(HitAction::Reject);
+        });
+        let yes = find(&hits, HitAction::Confirm);
+        let no = find(&hits, HitAction::Decline);
         assert!(yes.contains(yes.x + 1.0, yes.y + 1.0));
         assert!(no.contains(no.x + no.w - 1.0, no.y + no.h - 1.0));
         assert!(!yes.contains(no.x + 1.0, no.y + 1.0));
@@ -553,15 +399,14 @@ mod tests {
 
     #[test]
     fn pairing_code_is_drawn_in_gorget_pixels() {
-        let screen = Screen::Pairing {
+        let (canvas, _hits) = frame_for(&Screen::Pairing {
             code: "123456".to_owned(),
-        };
-        let (canvas, _hits) = frame_for(&screen, "Test");
-        // The pairing code is VT323 48px gorget-500 in the right column
-        // (x 544..772, y 223..280).
+            name: "Brave Otter".to_owned(),
+        });
+        // The code is VT323 96px gorget-500 in the upper-left block.
         let mut found = false;
-        for y in 223..290usize {
-            for x in 544..772usize {
+        for y in 196..304usize {
+            for x in 48..400usize {
                 let idx = (y * crate::raster::WIDTH + x) * 4;
                 let b = canvas.frame()[idx];
                 let g = canvas.frame()[idx + 1];
@@ -577,7 +422,7 @@ mod tests {
         }
         assert!(
             found,
-            "expected gorget-coloured code pixels in the right column"
+            "expected gorget-coloured code pixels in the pairing block"
         );
     }
 
@@ -585,34 +430,5 @@ mod tests {
     fn format_code_inserts_space() {
         assert_eq!(format_code("123456"), "123 456");
         assert_eq!(format_code("1234"), "12 34");
-    }
-
-    #[test]
-    fn pairing_and_timeout_offer_help() {
-        let (_, pairing) = frame_for(
-            &Screen::Pairing {
-                code: "123456".to_owned(),
-            },
-            "Test",
-        );
-        assert!(pairing.iter().any(|(_, a)| *a == HitAction::Help));
-        let (_, timeout) = frame_for(&Screen::Timeout, "Test");
-        assert!(timeout.iter().any(|(_, a)| *a == HitAction::Help));
-    }
-
-    #[test]
-    fn help_screen_renders_and_its_keys_are_actionable() {
-        let (canvas, hits) = help_frame(None);
-        assert_eq!(
-            canvas.frame().len(),
-            crate::raster::WIDTH * crate::raster::HEIGHT * 4
-        );
-        let bg = BG.to_bgra();
-        assert!(
-            canvas.frame().as_chunks::<4>().0.iter().any(|px| px != &bg),
-            "help screen drew no content"
-        );
-        assert!(hits.iter().any(|(_, a)| *a == HitAction::BackToPairing));
-        assert!(hits.iter().any(|(_, a)| *a == HitAction::Retry));
     }
 }

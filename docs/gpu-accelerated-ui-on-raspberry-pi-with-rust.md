@@ -282,9 +282,9 @@ Both windowing backends can be enabled; the platform picks based on
 
 * **Text hangs V3D.** GPUI's glyph-atlas / sprite text path drove `V3D_ERR_STAT
   0x1000` hangs and green garbage on Mesa 26.2.2 (independent of font size,
-  content, and MSAA via `ZED_PATH_SAMPLE_COUNT`). Rendering text yourself as
-  quads from a bitmap font avoids the entire path. (`tools/genfont.py` generates
-  an 8×14 font with Pillow.)
+  content, and MSAA via `ZED_PATH_SAMPLE_COUNT`). The fix is to stay off the
+  glyph-atlas path entirely: rasterise the whole frame on the CPU with
+  cosmic-text/swash and blit it as a GPUI `RenderImage`.
 * **No touch.** GPUI 0.2.2 has no Wayland `wl_touch` and no X11 touch events.
   Read the touchscreen device yourself (next section).
 * `ZED_PATH_SAMPLE_COUNT=1` disables the path MSAA intermediate if you suspect

@@ -1,15 +1,18 @@
-//! Persisted device state: identity, paired Home Assistant instances, selection.
+//! Durable device state: paired Home Assistant instances, the selected one, and
+//! their dashboard values.
 //!
-//! The file lives at `$SCREENSIGHT_STATE_DIR/state.json`
-//! (default `/var/lib/screensight/`). Writes are atomic (temp file + rename) so
-//! a power cut can never leave a half-written token store behind.
+//! The runtime keeps all of this in memory and treats it as authoritative; the
+//! [`Persistence`] seam mirrors every write to storage. Production uses SQLite
+//! through SeaORM via a background writer ([`ChannelPersistence`]); tests use
+//! [`NoopPersistence`].
 
-use std::fs;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::identity::DeviceIdentity;
 
@@ -23,81 +26,159 @@ pub struct PairedInstance {
     /// Long-lived bearer token minted at pairing time.
     pub token: String,
     /// Last address we saw this instance at, for diagnostics only.
-    #[serde(default)]
     pub last_ip: Option<String>,
     /// Unix seconds at which pairing completed.
     pub paired_at_unix: u64,
 }
 
-/// The whole persisted document.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Store {
-    /// Stable identity, generated on first boot.
+/// Everything loaded from storage at startup.
+pub struct Snapshot {
+    /// Stable device identity (generated on first boot).
     pub identity: DeviceIdentity,
-    /// Paired Home Assistant instances (any number; multi-pair).
-    #[serde(default)]
+    /// Paired instances.
     pub instances: Vec<PairedInstance>,
-    /// `ha_id` of the instance currently allowed to drive the display.
-    #[serde(default)]
+    /// `ha_id` of the instance allowed to drive the display.
     pub selected: Option<String>,
+    /// Per-instance dashboard values.
+    pub values: std::collections::HashMap<String, BTreeMap<String, String>>,
 }
 
-/// Directory holding `state.json`, honouring `SCREENSIGHT_STATE_DIR`.
-pub fn state_dir() -> PathBuf {
-    std::env::var_os("SCREENSIGHT_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/lib/screensight"))
+/// Durably stores writes coming from the in-memory runtime.
+///
+/// Implementations are fire-and-forget: they must never block the caller (the
+/// GPUI panel writes from its own thread).
+pub trait Persistence: Send + Sync {
+    /// Insert or replace an instance.
+    fn upsert_instance(&self, instance: &PairedInstance);
+    /// Remove an instance and all of its values.
+    fn remove_instance(&self, ha_id: &str);
+    /// Record which instance drives the display.
+    fn set_selected(&self, ha_id: Option<&str>);
+    /// Set one dashboard value.
+    fn set_value(&self, ha_id: &str, key: &str, value: &str);
+    /// Replace an instance's whole dashboard state.
+    fn replace_values(&self, ha_id: &str, values: &BTreeMap<String, String>);
 }
 
-fn state_path(dir: &Path) -> PathBuf {
-    dir.join("state.json")
+/// A write for the background SQLite writer.
+#[derive(Debug)]
+pub enum PersistCommand {
+    /// Insert or replace an instance.
+    UpsertInstance(PairedInstance),
+    /// Remove an instance and its values.
+    RemoveInstance(String),
+    /// Record the selected instance.
+    SetSelected(Option<String>),
+    /// Set one value.
+    SetValue {
+        ha_id: String,
+        key: String,
+        value: String,
+    },
+    /// Replace an instance's values.
+    ReplaceValues {
+        ha_id: String,
+        values: BTreeMap<String, String>,
+    },
+}
+
+/// Persistence that hands writes to the background SQLite writer.
+pub struct ChannelPersistence {
+    tx: UnboundedSender<PersistCommand>,
+}
+
+impl ChannelPersistence {
+    /// Wrap the writer's command channel.
+    #[must_use]
+    pub fn new(tx: UnboundedSender<PersistCommand>) -> Self {
+        Self { tx }
+    }
+}
+
+impl Persistence for ChannelPersistence {
+    fn upsert_instance(&self, instance: &PairedInstance) {
+        let _ = self
+            .tx
+            .send(PersistCommand::UpsertInstance(instance.clone()));
+    }
+
+    fn remove_instance(&self, ha_id: &str) {
+        let _ = self
+            .tx
+            .send(PersistCommand::RemoveInstance(ha_id.to_owned()));
+    }
+
+    fn set_selected(&self, ha_id: Option<&str>) {
+        let _ = self
+            .tx
+            .send(PersistCommand::SetSelected(ha_id.map(str::to_owned)));
+    }
+
+    fn set_value(&self, ha_id: &str, key: &str, value: &str) {
+        let _ = self.tx.send(PersistCommand::SetValue {
+            ha_id: ha_id.to_owned(),
+            key: key.to_owned(),
+            value: value.to_owned(),
+        });
+    }
+
+    fn replace_values(&self, ha_id: &str, values: &BTreeMap<String, String>) {
+        let _ = self.tx.send(PersistCommand::ReplaceValues {
+            ha_id: ha_id.to_owned(),
+            values: values.clone(),
+        });
+    }
+}
+
+/// Persistence that discards everything (tests, headless runs without a DB).
+pub struct NoopPersistence;
+
+impl Persistence for NoopPersistence {
+    fn upsert_instance(&self, _instance: &PairedInstance) {}
+    fn remove_instance(&self, _ha_id: &str) {}
+    fn set_selected(&self, _ha_id: Option<&str>) {}
+    fn set_value(&self, _ha_id: &str, _key: &str, _value: &str) {}
+    fn replace_values(&self, _ha_id: &str, _values: &BTreeMap<String, String>) {}
+}
+
+/// In-memory paired-instance registry that mirrors writes to persistence.
+pub struct Store {
+    instances: Vec<PairedInstance>,
+    selected: Option<String>,
+    persist: Arc<dyn Persistence>,
 }
 
 impl Store {
-    /// Load `state.json`, generating and persisting a fresh identity if absent.
-    ///
-    /// `model`/`version` only matter when the identity is created.
-    pub fn load_or_init(dir: &Path, model: &str, version: &str) -> Result<Self> {
-        let path = state_path(dir);
-        if path.exists() {
-            let raw =
-                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-            let store: Store = serde_json::from_str(&raw)
-                .with_context(|| format!("parsing {}", path.display()))?;
-            return Ok(store);
+    /// Build the registry from a loaded snapshot.
+    #[must_use]
+    pub fn new(
+        instances: Vec<PairedInstance>,
+        selected: Option<String>,
+        persist: Arc<dyn Persistence>,
+    ) -> Self {
+        Self {
+            instances,
+            selected,
+            persist,
         }
-
-        let store = Store {
-            identity: DeviceIdentity::generate(model, version)?,
-            instances: Vec::new(),
-            selected: None,
-        };
-        store.save(dir)?;
-        Ok(store)
     }
 
-    /// Atomically persist the store.
-    pub fn save(&self, dir: &Path) -> Result<()> {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        let final_path = state_path(dir);
-        let tmp_path = dir.join("state.json.tmp");
-        let json = serde_json::to_vec_pretty(self).context("serialising state")?;
-        fs::write(&tmp_path, &json).with_context(|| format!("writing {}", tmp_path.display()))?;
-        fs::rename(&tmp_path, &final_path)
-            .with_context(|| format!("renaming into {}", final_path.display()))?;
-        Ok(())
+    /// All paired instances.
+    #[must_use]
+    pub fn instances(&self) -> &[PairedInstance] {
+        &self.instances
     }
 
-    /// Look up a paired instance by id.
+    /// The selected instance id, if any.
+    #[must_use]
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
+    /// Look up an instance by id.
     #[must_use]
     pub fn instance(&self, ha_id: &str) -> Option<&PairedInstance> {
         self.instances.iter().find(|i| i.ha_id == ha_id)
-    }
-
-    /// The currently selected instance, if any (and still paired).
-    #[must_use]
-    pub fn selected_instance(&self) -> Option<&PairedInstance> {
-        self.selected.as_deref().and_then(|id| self.instance(id))
     }
 
     /// Whether any instance is paired.
@@ -107,39 +188,64 @@ impl Store {
     }
 
     /// Insert or replace an instance by `ha_id`.
-    pub fn upsert_instance(&mut self, instance: PairedInstance) {
+    pub fn upsert(&mut self, instance: PairedInstance) {
         if let Some(existing) = self
             .instances
             .iter_mut()
             .find(|i| i.ha_id == instance.ha_id)
         {
-            *existing = instance;
+            *existing = instance.clone();
         } else {
-            self.instances.push(instance);
+            self.instances.push(instance.clone());
         }
+        self.persist.upsert_instance(&instance);
     }
 
-    /// Remove an instance; clears the selection if it pointed at it.
+    /// Remove an instance; re-selects a remaining one if the selected vanished.
     ///
     /// Returns `true` if an instance was removed.
-    pub fn remove_instance(&mut self, ha_id: &str) -> bool {
+    pub fn remove(&mut self, ha_id: &str) -> bool {
         let before = self.instances.len();
         self.instances.retain(|i| i.ha_id != ha_id);
-        if self.selected.as_deref() == Some(ha_id) {
-            self.selected = None;
+        if self.instances.len() == before {
+            return false;
         }
-        self.instances.len() != before
+        self.persist.remove_instance(ha_id);
+        if self.selected.as_deref() == Some(ha_id) {
+            self.selected = self.instances.first().map(|i| i.ha_id.clone());
+            self.persist.set_selected(self.selected.as_deref());
+        }
+        true
     }
 
     /// Point the display at `ha_id`. Returns `false` if it is not paired.
     pub fn select(&mut self, ha_id: &str) -> bool {
-        if self.instance(ha_id).is_some() {
-            self.selected = Some(ha_id.to_owned());
-            true
-        } else {
-            false
+        if self.instance(ha_id).is_none() {
+            return false;
         }
+        self.set_selected(Some(ha_id.to_owned()));
+        true
     }
+
+    /// Replace the selection (used after pairing).
+    pub fn set_selected(&mut self, ha_id: Option<String>) {
+        self.selected = ha_id;
+        self.persist.set_selected(self.selected.as_deref());
+    }
+}
+
+/// The default state directory, honouring `SCREENSIGHT_STATE_DIR`.
+#[must_use]
+pub fn state_dir() -> PathBuf {
+    std::env::var_os("SCREENSIGHT_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/screensight"))
+}
+
+/// The SQLite database path inside `dir`.
+#[must_use]
+pub fn db_path(dir: &Path) -> PathBuf {
+    dir.join("screensight.db")
 }
 
 /// Current unix time in seconds.
@@ -151,19 +257,36 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Build an instance record for a completed pairing.
+#[must_use]
+pub fn new_instance(
+    ha_id: &str,
+    ha_name: &str,
+    token: String,
+    last_ip: Option<String>,
+) -> PairedInstance {
+    PairedInstance {
+        ha_id: ha_id.to_owned(),
+        ha_name: ha_name.to_owned(),
+        token,
+        last_ip,
+        paired_at_unix: now_unix(),
+    }
+}
+
+/// Build a snapshot with a freshly generated identity (tests and first boot).
+pub fn snapshot_with(identity: DeviceIdentity) -> Snapshot {
+    Snapshot {
+        identity,
+        instances: Vec::new(),
+        selected: None,
+        values: std::collections::HashMap::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "screensight-store-{tag}-{}-{}",
-            std::process::id(),
-            now_unix()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        dir
-    }
 
     fn instance(id: &str) -> PairedInstance {
         PairedInstance {
@@ -175,46 +298,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn init_creates_and_reloads_stable_identity() {
-        let dir = tmpdir("init");
-        let first = Store::load_or_init(&dir, "Screensight Studio", "0.1.0").unwrap();
-        let second = Store::load_or_init(&dir, "ignored", "ignored").unwrap();
-        assert_eq!(first.identity.id, second.identity.id);
-        assert_eq!(first.identity.name, second.identity.name);
-        assert_eq!(second.identity.model, "Screensight Studio");
-        assert!(!second.is_paired());
-        let _ = fs::remove_dir_all(&dir);
+    fn store() -> Store {
+        Store::new(Vec::new(), None, Arc::new(NoopPersistence))
     }
 
     #[test]
     fn upsert_select_and_remove() {
-        let dir = tmpdir("crud");
-        let mut store = Store::load_or_init(&dir, "m", "v").unwrap();
-        store.upsert_instance(instance("a"));
-        store.upsert_instance(instance("b"));
+        let mut store = store();
+        store.upsert(instance("a"));
+        store.upsert(instance("b"));
         assert!(store.is_paired());
-        assert_eq!(store.instances.len(), 2);
+        assert_eq!(store.instances().len(), 2);
 
-        // Upsert replaces rather than duplicates.
         let mut replacement = instance("a");
         replacement.ha_name = "Renamed".to_owned();
-        store.upsert_instance(replacement);
-        assert_eq!(store.instances.len(), 2);
+        store.upsert(replacement);
+        assert_eq!(store.instances().len(), 2);
         assert_eq!(store.instance("a").unwrap().ha_name, "Renamed");
 
         assert!(store.select("b"));
         assert!(!store.select("missing"));
-        assert_eq!(store.selected_instance().unwrap().ha_id, "b");
+        assert_eq!(store.selected(), Some("b"));
 
-        assert!(store.remove_instance("b"));
-        assert!(store.selected.is_none());
-        assert!(!store.remove_instance("b"));
-
-        // Round-trips through disk.
-        store.save(&dir).unwrap();
-        let reloaded = Store::load_or_init(&dir, "m", "v").unwrap();
-        assert_eq!(reloaded.instances.len(), 1);
-        let _ = fs::remove_dir_all(&dir);
+        assert!(store.remove("b"));
+        assert_eq!(store.selected(), Some("a"));
+        assert!(!store.remove("b"));
     }
 }

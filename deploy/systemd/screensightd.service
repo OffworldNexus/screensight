@@ -15,6 +15,9 @@ ExecStart=/usr/bin/screensightd
 Environment=WAYLAND_DISPLAY=wayland-0
 Environment=XDG_RUNTIME_DIR=/run/screensight-wl
 Environment=RUST_LOG=warn,screensight=info,screensightd=info
+# Kiosk panel: no pointer on the device, so hide it (the desktop emulator leaves
+# this unset and keeps the mouse pointer available for clicking).
+Environment=SCREENSIGHT_HIDE_CURSOR=1
 # Needed for evdev touch and DRM/seat access, as with the previous kiosk.
 User=root
 Restart=on-failure

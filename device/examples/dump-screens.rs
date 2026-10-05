@@ -5,6 +5,7 @@
 //! cargo run -p screensight --example dump-screens -- /tmp/screens
 //! ```
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -23,54 +24,59 @@ fn write_ppm(path: &Path, canvas: &FrameCanvas) {
     fs::write(path, out).expect("writing PPM");
 }
 
+fn dashboard(text: &str) -> Screen {
+    Screen::Dashboard {
+        values: BTreeMap::from([("text".to_owned(), text.to_owned())]),
+    }
+}
+
 fn main() {
     let dir = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "/tmp/opencode/screensight-screens".to_owned());
     fs::create_dir_all(&dir).expect("creating output directory");
 
-    let model = "Screensight Studio";
     let screens: Vec<(&str, Screen)> = vec![
+        (
+            "splash",
+            Screen::Splash {
+                name: "Brave Otter".to_owned(),
+            },
+        ),
+        ("idle", Screen::Idle),
         (
             "pairing",
             Screen::Pairing {
-                code: "724196".into(),
+                code: "724196".to_owned(),
+                name: "Brave Otter".to_owned(),
             },
         ),
         (
             "confirm",
             Screen::Confirm {
-                code: "724196".into(),
-                ha_name: "Home Assistant / My home".into(),
-            },
-        ),
-        ("timeout", Screen::Timeout),
-        ("no-home", Screen::NoHome),
-        (
-            "display-text",
-            Screen::Display {
-                text: Some("It's going to rain from 3pm until 4pm 🌧".into()),
+                ha_name: "Home Assistant / My home".to_owned(),
             },
         ),
         (
-            "display-unicode",
-            Screen::Display {
-                text: Some("Studio · 21.4°C · café ☕ · こんにちは · Ω≈ç√".into()),
+            "dashboard-text",
+            dashboard("It's going to rain from 3pm until 4pm 🌧"),
+        ),
+        (
+            "dashboard-unicode",
+            dashboard("Studio · 21.4°C · café ☕ · こんにちは · Ω≈ç√"),
+        ),
+        (
+            "dashboard-empty",
+            Screen::Dashboard {
+                values: BTreeMap::new(),
             },
         ),
-        ("display-empty", Screen::Display { text: None }),
     ];
 
     for (name, screen) in screens {
-        let (canvas, hits) = screens::frame_for(&screen, model);
+        let (canvas, hits) = screens::frame_for(&screen);
         let path = Path::new(&dir).join(format!("{name}.ppm"));
         write_ppm(&path, &canvas);
         println!("{} ({} hit regions)", path.display(), hits.len());
     }
-
-    // The help deck is a UI overlay, not a runtime screen.
-    let (canvas, hits) = screens::help_frame(None);
-    let path = Path::new(&dir).join("help.ppm");
-    write_ppm(&path, &canvas);
-    println!("{} ({} hit regions)", path.display(), hits.len());
 }

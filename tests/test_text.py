@@ -37,9 +37,9 @@ async def test_set_value_sends_frame(hass) -> None:
 
     await entity.async_set_value("Hello 🌧")
 
-    assert ws.sent == [{"type": "set_text", "text": "Hello 🌧"}]
+    assert ws.sent == [{"type": "set_value", "key": "text", "value": "Hello 🌧"}]
     assert entity.native_value == "Hello 🌧"
-    assert connection.text == "Hello 🌧"
+    assert connection.value("text") == "Hello 🌧"
 
 
 async def test_entity_metadata(hass) -> None:

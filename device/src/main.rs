@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use tokio::sync::mpsc;
 
-use screensight::control;
 use screensight::runtime::{Runtime, Screen};
-use screensight::store;
+use screensight::store::{self, ChannelPersistence};
+use screensight::{control, db, server};
 
 #[derive(Parser, Debug)]
 #[command(name = "screensightd", version, about = "Screensight display daemon")]
@@ -26,7 +27,7 @@ struct Args {
     #[arg(long)]
     headless: bool,
 
-    /// Directory for `state.json`.
+    /// Directory for the SQLite database.
     #[arg(long, env = "SCREENSIGHT_STATE_DIR")]
     state_dir: Option<PathBuf>,
 
@@ -58,21 +59,24 @@ fn main() -> Result<()> {
 
 async fn run(args: Args) -> Result<()> {
     let state_dir = args.state_dir.unwrap_or_else(store::state_dir);
-    let runtime = Arc::new(Runtime::load(
-        state_dir.clone(),
-        &args.model,
-        env!("CARGO_PKG_VERSION"),
-    )?);
+    let db = db::open(&store::db_path(&state_dir)).await?;
+    let snapshot = db::load_snapshot(&db, &args.model, env!("CARGO_PKG_VERSION")).await?;
+    let (persist_tx, persist_rx) = mpsc::unbounded_channel();
+    db::spawn_writer(db, persist_rx);
+    let runtime = Arc::new(Runtime::new(
+        snapshot,
+        Arc::new(ChannelPersistence::new(persist_tx)),
+    ));
     log::info!(
         "screensightd {} starting (state {}, model {})",
         env!("CARGO_PKG_VERSION"),
-        state_dir.display(),
+        store::db_path(&state_dir).display(),
         args.model,
     );
 
     // First boot with nothing paired: open a pairing window so the panel shows
     // a code straight away.
-    if !runtime.status().pairing && runtime.status().instances.is_empty() {
+    if runtime.status().instances.is_empty() && !runtime.status().pairing {
         if let Err(err) = runtime.arm_pairing() {
             log::warn!("could not open initial pairing window: {err:#}");
         }
@@ -97,41 +101,50 @@ async fn run(args: Args) -> Result<()> {
         }
     });
 
-    // WebSocket server for the Home Assistant link.
-    let ws_runtime = Arc::clone(&runtime);
+    // WebSocket server for the Home Assistant link. Bind explicitly so the
+    // mDNS advertisement only goes out once the port is actually ours: a device
+    // that could not bind must not appear reachable in Home Assistant.
     let port = args.port;
-    tokio::spawn(async move {
-        if let Err(err) = screensight::server::serve(ws_runtime, port).await {
-            log::error!("websocket server stopped: {err:#}");
-        }
-    });
+    match server::bind(port).await {
+        Ok(listener) => {
+            let ws_runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                if let Err(err) = server::serve_listener(ws_runtime, listener).await {
+                    log::error!("websocket server stopped: {err:#}");
+                }
+            });
 
-    // mDNS advertisement (best-effort: the daemon runs fine without Avahi).
-    let mdns_runtime = Arc::clone(&runtime);
-    tokio::spawn(async move {
-        if let Err(err) = screensight::mdns::advertise(mdns_runtime, port).await {
-            log::warn!("mDNS advertisement unavailable: {err:#}");
+            // mDNS advertisement (best-effort: the daemon runs fine without Avahi).
+            let mdns_runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                if let Err(err) = screensight::mdns::advertise(mdns_runtime, port).await {
+                    log::warn!("mDNS advertisement unavailable: {err:#}");
+                }
+            });
         }
-    });
+        Err(err) => {
+            log::error!("cannot bind websocket port {port}: {err:#}; not advertising over mDNS");
+        }
+    }
 
     // Renderer / panel: with the `gui` feature this paints under cage;
     // otherwise we log screen transitions so headless runs remain observable.
-    run_panel(runtime, args.model, args.headless).await;
+    run_panel(runtime, args.headless).await;
 
     Ok(())
 }
 
 /// Drive the panel. On the device this blocks on the GPUI renderer (feeding it
 /// screen changes); headless it watches the runtime and logs transitions.
-async fn run_panel(runtime: Arc<Runtime>, model: String, headless: bool) {
+async fn run_panel(runtime: Arc<Runtime>, headless: bool) {
     #[cfg(feature = "gui")]
     {
         if !headless {
             log::info!("starting GPUI panel");
             // GPUI blocks the main thread, so keep advancing the runtime's
             // time-based state and feeding the panel from a worker task.
-            tokio::spawn(run_headless(Arc::clone(&runtime)));
-            if let Err(err) = screensight::panel::run(runtime, model) {
+            tokio::spawn(run_screen_loop(Arc::clone(&runtime)));
+            if let Err(err) = screensight::panel::run(runtime) {
                 log::error!("panel stopped: {err:#}");
             }
             return;
@@ -140,18 +153,19 @@ async fn run_panel(runtime: Arc<Runtime>, model: String, headless: bool) {
     #[cfg(not(feature = "gui"))]
     {
         // Without the `gui` feature the daemon is always headless.
-        let _ = (model, headless);
+        let _ = headless;
     }
-    run_headless(runtime).await;
+    run_screen_loop(runtime).await;
 }
 
-/// Headless fallback: watch the runtime and log screen transitions. With the
-/// `gui` feature enabled this path still feeds the panel when running headless.
-async fn run_headless(runtime: Arc<Runtime>) {
+/// Watch the runtime and feed the panel whenever the screen changes. Wakes
+/// immediately on a runtime change and otherwise polls for time-based
+/// transitions (the pairing window expiring).
+async fn run_screen_loop(runtime: Arc<Runtime>) {
+    let dirty = runtime.dirty();
     let mut last: Option<Screen> = None;
-    let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
     loop {
-        ticker.tick().await;
         let screen = runtime.tick(Instant::now());
         if last.as_ref() != Some(&screen) {
             log::info!("panel screen -> {}", describe(&screen));
@@ -159,19 +173,24 @@ async fn run_headless(runtime: Arc<Runtime>) {
             screensight::panel::set_screen(screen.clone());
             last = Some(screen);
         }
+        tokio::select! {
+            _ = dirty.notified() => {}
+            _ = ticker.tick() => {}
+        }
     }
 }
 
 /// One-line description of a [`Screen`] for logs.
 fn describe(screen: &Screen) -> String {
     match screen {
-        Screen::Unpaired => "unpaired".to_owned(),
-        Screen::NoHome => "no home discovered".to_owned(),
-        Screen::Timeout => "pairing window timed out".to_owned(),
-        Screen::Pairing { code } => format!("pairing (code {code})"),
-        Screen::Confirm { ha_name, .. } => format!("confirm {ha_name}"),
-        Screen::Display { text: Some(text) } => format!("display {:?}", truncate(text, 40)),
-        Screen::Display { text: None } => "display (no text)".to_owned(),
+        Screen::Splash { name } => format!("splash {name}"),
+        Screen::Idle => "idle".to_owned(),
+        Screen::Pairing { code, name } => format!("pairing {name} (code {code})"),
+        Screen::Confirm { ha_name } => format!("confirm {ha_name}"),
+        Screen::Dashboard { values } => match values.get("text") {
+            Some(text) => format!("dashboard {:?}", truncate(text, 40)),
+            None => "dashboard (empty)".to_owned(),
+        },
     }
 }
 
