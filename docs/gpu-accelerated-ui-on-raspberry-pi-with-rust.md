@@ -235,11 +235,12 @@ Transitively pulled in by `gpui_http_client -> zed-async-tar`. It references
 error[E0425]: cannot find value `ENOATTR` in crate `::libc`
 ```
 
-Fix: vendor it and map `ENOATTR` to the Linux equivalent `ENODATA`, then
+Fix: patch it in a fork and map `ENOATTR` to the Linux equivalent `ENODATA`,
+then pin that fork:
 
 ```toml
 [patch.crates-io]
-xattr = { path = "vendor/xattr" }
+xattr = { git = "https://github.com/OffworldNexus/xattr", rev = "<rev>" }
 ```
 
 (The tar/xattr code path is never exercised; it only has to compile.)

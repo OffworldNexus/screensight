@@ -70,8 +70,8 @@ filterwarnings = [
 
 [tool.ruff]
 target-version = "py312"
-# The vendored Rust tree and generated HA throwaway dev config are not Python
-# we own.
+# The Rust build tree and generated HA throwaway dev config are not Python we
+# own.
 exclude = [
     ".venv",
     "target",

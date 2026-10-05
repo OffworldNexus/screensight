@@ -239,5 +239,6 @@ to a transient session while another session owns `tty1`. Touch is read directly
 from the `ft5x06` evdev device (`device/src/touch.rs`) because GPUI 0.2.2 has no
 Wayland touch support.
 
-The `vendor/` patches (`xattr`, `blade-graphics`) are applied at the Cargo
-workspace root and are still required.
+The patched `xattr`, `blade-graphics` and `gpui` crates live in rev-pinned forks
+under the `OffworldNexus` org (each README documents its delta) and are wired in
+at the Cargo workspace root via `[patch.crates-io]`.

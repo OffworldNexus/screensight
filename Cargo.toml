@@ -7,15 +7,16 @@
 resolver = "2"
 members = ["device"]
 
-# `xattr` 0.2.3 (via gpui_http_client -> zed-async-tar) references
-# `libc::ENOATTR`, absent on Linux/aarch64. `blade-graphics` requests an
-# unsupported X11 composite-alpha flag on V3DV and prefers MAILBOX present mode.
+# The three patched crates live in their own repos (each README documents the
+# delta) and are pinned by rev so builds stay reproducible. `xattr` 0.2.3
+# references `libc::ENOATTR`, absent on Linux/aarch64; `blade-graphics` 0.7.1
+# needs a V3DV-compatible X11/MAILBOX path; `gpui` 0.2.2 carries the Screensight
+# GPU CRT screen-transition shader (see `paint_crt_transition` and the `crt`
+# branch in `shaders.wgsl`).
 [patch.crates-io]
-xattr = { path = "vendor/xattr" }
-blade-graphics = { path = "vendor/blade-graphics" }
-# Screensight vendors gpui to add a GPU CRT screen-transition shader (see
-# `paint_crt_transition` and the `crt` branch in `shaders.wgsl`).
-gpui = { path = "vendor/gpui" }
+xattr = { git = "https://github.com/OffworldNexus/xattr", rev = "52407f0b6d8c83da642ccdb0a684c7d952b847d4" }
+blade-graphics = { git = "https://github.com/OffworldNexus/blade-graphics", rev = "5b6b12aa6c57fb358fc296e0957e996514fdd983" }
+gpui = { git = "https://github.com/OffworldNexus/gpui", rev = "cf52b95becd458d7594efdcb5db91d474caac2ac" }
 
 [profile.release]
 opt-level = 3
