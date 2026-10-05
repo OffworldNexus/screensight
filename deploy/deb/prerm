@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stop the Screensight services when the package is removed.
+set -e
+
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+    systemctl stop screensightd.service >/dev/null 2>&1 || true
+    systemctl stop screensight.socket >/dev/null 2>&1 || true
+    systemctl stop cage.service >/dev/null 2>&1 || true
+    systemctl disable screensightd.service >/dev/null 2>&1 || true
+    systemctl disable screensight.socket >/dev/null 2>&1 || true
+    systemctl disable cage.service >/dev/null 2>&1 || true
+    systemctl daemon-reload || true
+fi
+
+exit 0

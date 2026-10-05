@@ -15,6 +15,9 @@ test-results/
 .coverage
 htmlcov/
 
+# Local dev scratch (throwaway HA instance, device emulation state)
+.dev/
+
 # HA throwaway dev instance (generated)
 custom_components/screensight/dev/config/
 !custom_components/screensight/dev/config/.gitkeep

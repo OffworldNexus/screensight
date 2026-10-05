@@ -1,5 +1,19 @@
 # Screensight device screen set
 
+## Latest revision: Act now replaces corner alerts
+
+Snooze closes an Immediate/Critical pop-in and retains its card in **Act now**;
+tap that card to reopen it. There are no duplicate corner indicators. Discard
+removes the occurrence from both until clear → new occurrence.
+
+**Act now** and **Maintenance** disappear individually when empty. The remaining
+section expands to the full right-column height. With neither populated, the
+current placeholder proposal is the bee-eater and **3615 SCREENSIGHT / Rien à
+signaler**. Unknown/unavailable data is not empty. Revised states are
+`immediate-snoozed`, `critical-snoozed`, `alerts-multiple`, `actions-only` and
+`both-empty`; the gallery now contains **69** compositions. The historical
+corner wording below is superseded by this revision.
+
 The current review entry point is [the complete gallery](screensight-screen-set.html).
 Each device scene is **800 × 480**, with no device scrolling. The gallery itself
 is a review document and may scroll. Use `?screen=overview` (or another scene ID)

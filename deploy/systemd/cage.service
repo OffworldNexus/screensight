@@ -1,0 +1,29 @@
+[Unit]
+Description=Screensight kiosk Wayland compositor (cage)
+Documentation=https://github.com/offworld-nexus/screensight
+After=systemd-user-sessions.service
+# Take over from any previous kiosk / PoC compositor.
+Conflicts=kiosk.service gpui-poc.service
+
+[Service]
+Type=simple
+Environment=XDG_RUNTIME_DIR=/run/screensight-wl
+Environment=XCURSOR_THEME=screensight-blank
+Environment=XCURSOR_SIZE=24
+Environment=XCURSOR_PATH=/usr/share/icons
+# On the Raspberry Pi's DSI panel, wlroots/V3D fails its swapchain format test
+# when DRM format modifiers are used ("Swapchain for output 'DSI-1' failed
+# test"), leaving a blank screen. Forcing linear buffers fixes presentation.
+Environment=WLR_DRM_NO_MODIFIERS=1
+ExecStartPre=/usr/bin/install -d -m 0700 /run/screensight-wl
+# Bare cage: it idles with no client and stays alive when the daemon restarts.
+ExecStart=/usr/bin/cage
+Restart=always
+RestartSec=2
+# Runs as root because libseat/logind will not hand DRM master to a transient
+# session while another session owns tty1 (acceptable on this single-purpose
+# display device).
+User=root
+
+[Install]
+WantedBy=graphical.target

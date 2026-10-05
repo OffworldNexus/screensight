@@ -1,0 +1,69 @@
+[package]
+name = "screensight"
+version = "0.1.0"
+edition = "2021"
+description = "Screensight Raspberry Pi display daemon and control CLI (GPUI/V3D)"
+license = "MIT"
+publish = false
+
+[features]
+default = []
+# The GPUI/V3D rendering shell for the physical panel. Off by default so host
+# and CI builds of the daemon/core never need X11/xkbcommon/freetype; the device
+# build (cross, apt package, desktop emulation) enables it explicitly.
+#
+# `image` is only needed by the GPUI panel to hand the CPU-rasterised BGRA frame
+# to `RenderImage`; the rasteriser itself has no GPUI/image dependency.
+gui = ["dep:gpui", "dep:image"]
+
+[[bin]]
+name = "screensightd"
+path = "src/main.rs"
+
+[[example]]
+name = "hello"
+required-features = ["gui"]
+
+[dependencies]
+# GPUI 0.2.2 ships a consuming Linux renderer. We only need the X11 backend
+# (the Pi's kiosk already runs under Xorg), so we drop the Wayland backend and
+# the (Windows-only) manifest feature to keep the dependency/ABI surface small.
+gpui = { version = "0.2.2", optional = true, default-features = false, features = ["wayland", "x11"] }
+# The CPU rasteriser shapes text with cosmic-text (rustybuzz) and rasterises
+# glyphs with swash. Fontconfig is deliberately disabled: we only ever load the
+# bundled fonts from `device/assets/fonts`, never system fonts. This dependency
+# is unconditional so the rasteriser is testable on hosts/CI without a GPU.
+cosmic-text = { version = "0.14", default-features = false, features = ["std", "swash"] }
+# `fontdb` and `unicode-script` must match the versions cosmic-text re-exports
+# types from; used for the font database and the custom fallback chain.
+fontdb = "0.16"
+unicode-script = "0.5"
+# Only used by the GPUI panel to wrap our BGRA frame as a `RenderImage`.
+image = { version = "0.25", default-features = false, optional = true }
+log = "0.4"
+env_logger = "0.11"
+libc = "0.2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.3"
+subtle = "2"
+tokio = { version = "1.53", features = [
+    "rt-multi-thread",
+    "net",
+    "time",
+    "sync",
+    "macros",
+    "io-util",
+    "signal",
+] }
+listenfd = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+thiserror = "2"
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "time", "net"] }

@@ -1,0 +1,24 @@
+[Unit]
+Description=Screensight display daemon
+Documentation=https://github.com/offworld-nexus/screensight
+# The control socket is created by systemd and handed to the daemon as fd 3.
+Requires=screensight.socket
+After=screensight.socket
+# The compositor must be up before the daemon can open its Wayland window.
+Requires=cage.service
+After=cage.service
+
+[Service]
+Type=simple
+# No --headless: the device package is built with the `gui` feature.
+ExecStart=/usr/bin/screensightd
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/screensight-wl
+Environment=RUST_LOG=warn,screensight=info,screensightd=info
+# Needed for evdev touch and DRM/seat access, as with the previous kiosk.
+User=root
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical.target
