@@ -127,7 +127,7 @@ function alert(s, critical, title, source, value, evidence, instruction, detail,
   else copy(s, evidence, x, y + 158, 14, colors.muted);
   copy(s, instruction, x, y + 207, critical ? 23 : 18, tone);
   const ky = critical ? 350 : 337;
-  key(s, 'Snooze · corner', x, ky, 238, critical ? 'critical-corner' : 'immediate-corner', critical ? 'rust' : 'gold', 56);
+  key(s, 'Snooze · Act now', x, ky, 238, critical ? 'critical-snoozed' : 'immediate-snoozed', critical ? 'rust' : 'gold', 56);
   key(s, 'Discard', x + 250, ky, 190, discardTarget, 'quiet', 56);
   copy(s, 'See more ↗', x + 468, ky + 20, 12, colors.muted); s.links.push({ label: 'See more', x: x + 458, y: ky, w: 154, h: 56, target: detail });
   copy(s, critical ? 'DISPLAY ONLY · DOES NOT SILENCE THE PHYSICAL ALARM' : 'SNOOZE = CORNER / DISCARD = UNTIL NEXT OCCURRENCE', x, critical ? 437 : 395, 10, colors.muted);
@@ -137,12 +137,12 @@ alert(makeScene('immediate-co2', '11 / Immediate · room CO₂', 'Ventilation ne
 alert(makeScene('immediate-voc', '12 / Immediate · room VOC', 'VOC index is not a toxic-gas concentration.'), false, 'CHECK THE AIR SOURCE', 'ROOM AIR / VOC INDEX / RISING', '245', 'VOC index · example reading', 'Check sources; ventilate if appropriate.', 'detail-voc', 'discard-immediate');
 alert(makeScene('critical-fire', '13 / Critical · fire alarm', 'Full takeover; display actions never silence alarm hardware.'), true, 'FIRE ALARM', 'SMOKE DETECTOR / STUDIO / ALARM ACTIVE', '', 'Alarm reported active · follow your emergency plan.', 'Leave the area. Get to safety.', 'detail-fire', 'discard-critical');
 alert(makeScene('critical-toxic', '14 / Critical · toxic air', 'Use a dedicated validated alarm, not the generic VOC index.'), true, 'TOXIC AIR ALARM', 'DEDICATED CO ALARM / STUDIO / ALARM ACTIVE', '', 'Source reports danger · do not infer safety from a VOC sensor.', 'Leave the area. Get to fresh air.', 'detail-toxic', 'discard-critical');
-overview(makeScene('immediate-corner', '15 / Immediate · snoozed to corner', 'Persistent unresolved badge; tap to reopen.'), 'day', 'immediate');
-overview(makeScene('critical-corner', '16 / Critical · snoozed to corner', 'Critical retains crown colour and danger wording.'), 'day', 'critical');
-const multi = makeScene('corner-multiple', '17 / Corner · multiple unresolved alerts', 'Critical wins the corner; expand the other alerts without scrolling.'); overview(multi, 'day', 'critical'); key(multi, '+2 ACT NOW', 596, 64, 188, 'immediate-co2', 'gold', 48);
+overview(makeScene('immediate-snoozed', '15 / Immediate · snoozed into Act now', 'Pop-in closed; its Act now card reopens it.'), 'day');
+overview(makeScene('critical-snoozed', '16 / Critical · snoozed into Act now', 'Danger remains distinctly marked within Act now.'), 'day');
+const multi = makeScene('alerts-multiple', '17 / Act now · multiple unresolved alerts', 'Priority-ordered cards replace duplicate corner indicators.'); overview(multi, 'day');
 for (const [id, title, critical] of [['discard-immediate', '18 / Discard · immediate occurrence', false], ['discard-critical', '19 / Discard · critical occurrence', true]]) {
   const s = makeScene(id, title, 'Confirm discarding this occurrence, not clearing the source.'); sheet(s, critical ? 'DISCARD / CRITICAL OCCURRENCE' : 'DISCARD / THIS OCCURRENCE', 'Hide this alert until it happens again?');
-  copy(s, 'The pop-in and corner indicator will disappear.', 84, 201, 14, colors.muted); copy(s, 'It re-arms only after clear → new occurrence.', 84, 228, 14, colors.muted);
+  copy(s, 'The pop-in and its Act now card will disappear.', 84, 201, 14, colors.muted); copy(s, 'It re-arms only after clear → new occurrence.', 84, 228, 14, colors.muted);
   if (critical) copy(s, 'This does NOT silence the physical alarm.', 84, 262, 15, colors.danger);
   key(s, 'Discard occurrence', 84, 322, 290, 'occurrence-discarded', critical ? 'rust' : 'gold'); key(s, 'Keep alert', 386, 322, 250, critical ? 'critical-fire' : 'immediate-printer');
 }
@@ -268,3 +268,42 @@ const hc = makeScene('history-empty', '64 / History · no samples yet', 'A blank
 const hs = makeScene('history-unavailable', '65 / History · unavailable', 'Keep the alert’s current source state; history failure is not resolution.'); tag(hs, 'DETAIL / HISTORY UNAVAILABLE', 28, 22, colors.gold); copy(hs, 'Couldn’t load sensor history', 28, 70, 36, colors.paper, 'VT323'); copy(hs, 'The active alert is unchanged. No graph is available.', 28, 160, 16, colors.muted); key(hs, 'Retry history', 28, 410, 232, 'history-empty', 'gold'); key(hs, 'Back to alert', 540, 410, 232, 'immediate-co2');
 const su = makeScene('alarm-source-unavailable', '66 / Alarm source · unavailable', 'Never auto-resolve an alarm because its source stopped reporting.'); tag(su, 'CRITICAL / SOURCE UNAVAILABLE', 28, 22, colors.danger); copy(su, 'Last known state: ALARM ACTIVE', 28, 72, 44, colors.paper, 'VT323'); copy(su, 'The source is not reporting. Resolution is not confirmed.', 28, 166, 16, colors.muted); copy(su, 'Check the physical alarm and follow your emergency plan.', 28, 210, 16, colors.danger); key(su, 'Back to alarm', 28, 410, 260, 'critical-fire', 'rust');
 const pn = makeScene('pairing-no-home', '67 / Pairing · no home discovered', 'No discovered home is different from a timed-out request.'); pairingBase(pn, 'SETUP / WAIT', 'No home found yet.'); copy(pn, 'This display is ready to pair.', 28, 178, 23); copy(pn, 'Open the Screensight integration in your home to continue.', 28, 232, 15, colors.muted); copy(pn, 'Check that the display and server share a local network.', 28, 266, 14, colors.muted); key(pn, 'Retry discovery', 28, 410, 300, 'pairing', 'gold'); key(pn, 'Connection help', 542, 410, 230, 'pairing-help');
+overview(makeScene('actions-only', '68 / Act now · full-height column', 'Maintenance is empty and therefore absent.'));
+overview(makeScene('both-empty', '69 / Nothing pending · bird & 3615', 'No empty section headings; one quiet identity placeholder.'), 'calm');
+/* Empty lists relinquish their space; unknown data does not qualify as empty.
+ * Apply only to overview compositions, never to obscuring detail/choice sheets. */
+function removeColumn(s) {
+  s.nodes = s.nodes.filter(n => !(n.x >= 430 && n.y >= 186));
+  s.links = s.links.filter(l => !(l.x >= 430 && l.y >= 186));
+}
+function fullMaintenance(s) {
+  removeColumn(s); shape(s, 'Maintenance / full height', 430, 186, 350, 278, colors.panel, 5);
+  tag(s, 'MAINTENANCE / 04', 446, 202);
+  [['Re-humidify humidor', 'RH 61% · target 68–72%', 'maintenance-snooze'], ['Update air sensor', 'Firmware 1.8.2 available', 'update-review'], ['Replace sensor battery', 'Study window · battery 9%', 'maintenance-battery']].forEach(([title, hint, target], i) => {
+    const y = 237 + i * 62; copy(s, title, 446, y, 14); copy(s, hint, 446, y + 24, 11, colors.muted); key(s, i === 1 ? 'GO' : 'zZ', 720, y - 5, 48, target, i === 1 ? 'gold' : 'quiet', 48);
+  });
+  key(s, '+1 queued · filter  →', 442, 416, 326, 'maintenance-queue', 'quiet', 44);
+}
+function fullActions(s, critical = false) {
+  removeColumn(s); shape(s, 'Act now / full height', 430, 186, 350, 278, '#2b2115', 5); tag(s, 'ACT NOW / ' + (critical ? '03' : '02'), 446, 202, colors.gold);
+  const rows = critical ? [['! FIRE ALARM', 'CRITICAL · smoke detector active', 'critical-fire', colors.danger], ['Printer at clogging point', 'PLA chamber 42°C · cool enclosure', 'immediate-printer', colors.gold], ['Ventilate the room', 'CO₂ 1,420 ppm · rising', 'immediate-co2', colors.gold]] : [['Printer at clogging point', 'PLA chamber 42°C · cool enclosure', 'immediate-printer', colors.gold], ['Ventilate the room', 'CO₂ 1,420 ppm · rising', 'immediate-co2', colors.gold]];
+  rows.forEach(([title, hint, target, tone], i) => { const y = 236 + i * 73; shape(s, 'Act now / priority rail', 430, y - 6, 3, 62, tone); copy(s, title, 446, y, 14, tone, 'JetBrains Mono', 600); copy(s, hint, 446, y + 26, 10, colors.muted); key(s, 'VIEW', 716, y - 3, 52, target, 'quiet', 52); });
+}
+for (const s of screensightScenes) {
+  s.nodes.forEach(n => { if (n.text === 'SNOOZE = CORNER / DISCARD = UNTIL NEXT OCCURRENCE') n.text = 'SNOOZE = ACT NOW / DISCARD = NEXT OCCURRENCE'; });
+  if (!s.nodes.some(n => n.name === 'Clock') && !s.nodes.some(n => n.text === 'STUDIO / LYON')) continue;
+  if (s.nodes.some(n => n.name === 'Modal scrim' || n.name === 'Backdrop' || n.name === 'Choice sheet')) continue;
+  if (s.id === 'overview-calm' || s.id === 'resolved' || ['room-empty', 'room-unavailable', 'heating-idle', 'heating-unavailable', 'weather-no-rain', 'weather-no-location', 'weather-loading', 'weather-unavailable', 'agenda-next-only', 'agenda-empty', 'agenda-not-configured', 'agenda-unavailable', 'light-not-configured'].includes(s.id)) fullMaintenance(s);
+  if (s.id === 'maintenance-empty' || s.id === 'actions-only') fullActions(s);
+  if (s.id === 'critical-snoozed' || s.id === 'alerts-multiple') {
+    const row = s.nodes.filter(n => n.x >= 430 && n.y >= 218 && n.y < 267);
+    s.nodes = s.nodes.filter(n => !row.includes(n)); s.links = s.links.filter(l => l.target !== 'immediate-printer');
+    shape(s, 'Critical Act now rail', 430, 220, 3, 45, colors.danger); copy(s, '! FIRE ALARM', 442, 220, 14, colors.danger, 'JetBrains Mono', 600); copy(s, 'CRITICAL · smoke detector active', 442, 242, 10, colors.danger); key(s, 'VIEW', 716, 218, 52, 'critical-fire', 'rust', 48);
+  }
+  if (s.id === 'both-empty') {
+    removeColumn(s); shape(s, 'Quiet identity panel', 430, 186, 350, 278, colors.panel, 5);
+    tag(s, '3615 SCREENSIGHT', 468, 208, colors.teal);
+    s.nodes.push({ type: 'image', name: 'Bee-eater / empty identity', src: 'mascot.svg', x: 504, y: 226, w: 204, h: 204 });
+    copy(s, 'Rien à signaler.', 512, 432, 13, colors.muted);
+  }
+}

@@ -1,0 +1,54 @@
+name: Rust
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: System dependencies for GPUI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libwayland-dev libvulkan-dev \
+            libfontconfig1-dev libfreetype-dev libasound2-dev
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo clippy (workspace + gui)
+        run: cargo clippy -p screensight --all-targets --features gui -- -D warnings
+      - name: cargo test (headless core)
+        run: cargo test -p screensight
+      - name: cargo build --release (device, gui)
+        run: cargo build --release -p screensight --features gui
+
+  # The aarch64 release build needs the custom `cross` image (see Cross.toml,
+  # deploy/cross-image/Dockerfile). GitHub-hosted runners cannot build that
+  # image cheaply, so this job is intentionally left disabled.
+  #
+  # cross-aarch64:
+  #   name: Release build (aarch64)
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@master
+  #       with:
+  #         toolchain: 1.98.1
+  #     - run: cargo install cross --version 0.2.5
+  #     - run: cargo cross build --release --target aarch64-unknown-linux-gnu

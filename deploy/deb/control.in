@@ -1,0 +1,12 @@
+Package: screensight
+Version: @VERSION@
+Section: misc
+Priority: optional
+Architecture: arm64
+Maintainer: Rémy Sanchez <remy.sanchez@hyperthese.net>
+Depends: cage, avahi-daemon, libc6, libxkbcommon0, libxkbcommon-x11-0, libxcb1, libfreetype6, libwayland-client0, libwayland-cursor0, libwayland-egl1, libvulkan1, libgcc-s1
+Description: Screensight display daemon for Home Assistant
+ A full-screen Home Assistant companion display daemon for the Raspberry Pi.
+ It advertises itself over mDNS, supports device-verified pairing with one or
+ more Home Assistant instances, keeps a heartbeat WebSocket link, and renders a
+ configurable display text on the 800x480 touch panel.
