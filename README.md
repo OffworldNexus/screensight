@@ -229,8 +229,9 @@ make ha-bdd      # only the @bdd scenarios
 * Python: config-flow, Noise transport, connection and text-entity tests, plus
   pytest-bdd scenarios with Allure reporting.
 * GitHub Actions: `.github/workflows/rust.yml` (fmt, clippy, tests, release
-  build with the `gui` feature) and `.github/workflows/python.yml` (ruff, mypy,
-  pytest, Allure artifact).
+  build with the `gui` feature), `.github/workflows/python.yml` (ruff, mypy,
+  pytest, Allure artifact) and `.github/workflows/release.yml` (builds the
+  aarch64 `.deb` and attaches it to the GitHub Release on `v*` tags).
 
 ---
 

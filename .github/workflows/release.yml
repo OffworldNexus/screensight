@@ -1,0 +1,54 @@
+name: Release
+
+# Builds the aarch64 Raspberry Pi package (`.deb`) and attaches it to the
+# GitHub Release for the tag. Triggered by version tags, e.g. `v0.1.0`.
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    name: Build aarch64 .deb
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The aarch64 build needs the custom `cross` image (see Cross.toml and
+      # deploy/cross-image/Dockerfile). Cache its layers in the Actions cache so
+      # repeat releases do not rebuild the whole Pi toolchain from scratch.
+      - name: Build the Pi cross toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy/cross-image
+          tags: screensight-cross-aarch64:latest
+          load: true
+          cache-from: type=gha,scope=cross-aarch64
+          cache-to: type=gha,mode=max,scope=cross-aarch64
+
+      - name: Install cross
+        run: cargo install cross --version 0.2.5
+
+      # Produces deploy/deb/out/screensight_<version>_arm64.deb from
+      # device/Cargo.toml's version, using the image built above.
+      - name: Build the .deb
+        run: ./deploy/deb/build.sh
+
+      - name: Publish the release with the .deb
+        uses: softprops/action-gh-release@v2
+        with:
+          files: deploy/deb/out/*.deb
+          generate_release_notes: true
+          fail_on_unmatched_files: true
