@@ -9,7 +9,6 @@ from homeassistant.helpers.entity import Entity
 
 from .const import (
     CONF_DEVICE_ID,
-    CONF_MODEL,
     CONF_NAME,
     CONF_VERSION,
     DEFAULT_MODEL,
@@ -35,7 +34,7 @@ class ScreensightEntity(Entity):
             identifiers={(DOMAIN, entry.data[CONF_DEVICE_ID])},
             name=entry.data.get(CONF_NAME),
             manufacturer=MANUFACTURER,
-            model=entry.data.get(CONF_MODEL, DEFAULT_MODEL),
+            model=DEFAULT_MODEL,
             sw_version=entry.data.get(CONF_VERSION),
         )
 

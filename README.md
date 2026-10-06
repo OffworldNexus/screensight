@@ -5,25 +5,59 @@
 </picture>
 
 <p align="center">
-  <a href="#how-it-works">How it works</a> ·
-  <a href="#repository-layout">Layout</a> ·
-  <a href="#building-the-device">Build</a> ·
-  <a href="#home-assistant-integration">Home Assistant</a> ·
-  <a href="#tests-and-ci">Tests &amp; CI</a> ·
-  <a href="docs/brand/">Brand</a>
+  <a href="#the-road-ahead">Road ahead</a> ·
+  <a href="#screens">Screens</a> ·
+  <a href="#getting-started">Get started</a> ·
+  <a href="#under-the-hood">Under the hood</a> ·
+  <a href="#brand">Brand</a> ·
+  <a href="#tests--ci">Tests</a>
 </p>
 
-A Home Assistant companion display for the Raspberry Pi. A small Rust daemon
-drives the Pi's 800×480 touch panel, advertises itself over mDNS, pairs with
-one or more Home Assistant instances using a code shown on the screen, and keeps
-a heartbeat WebSocket link so Home Assistant can set the on-screen text.
+**Screensight** turns a Raspberry Pi and its 800×480 touch panel into a calm,
+always-on window on your home. It pairs with Home Assistant over a
+Noise-encrypted link, shows what matters at a glance, and stays quiet until
+something actually needs you.
 
-This repository contains two components:
-
-| Component | Path | Language |
+| Always-on & calm | Private by design | Yours to build |
 | --- | --- | --- |
-| Device daemon + control CLI | `device/` | Rust (GPUI/V3D) |
-| Home Assistant custom integration | `custom_components/screensight/` | Python (HACS) |
+| A glanceable panel that lives on the wall and never asks for a phone. | Local-only Noise XX/IK link — no cloud, no re-usable token, no accounts. | A Rust device daemon and a HACS-native Home Assistant integration. |
+
+---
+
+## The road ahead
+
+Today Screensight shows free-form text pushed from Home Assistant. It is growing
+into an ambient dashboard for the whole home — the kind you read in one look on
+the way past:
+
+* **Air you can breathe** — CO₂, VOC and PM trends from your sensors, plotted,
+  not buried in an entity page.
+* **A day that runs itself** — agenda, bins, chores and routines, ticking over.
+* **Maintenance that nags politely** — batteries, filters and firmware, queued
+  and snoozable.
+* **Alerts that earn their place** — fire, toxic and corner cases escalate;
+  everything else waits, with history and snooze.
+* **Light, climate, media** — status and control for the rooms that matter.
+* **Any home, one panel** — several Home Assistant instances, one identity, one
+  place to look.
+
+The design system already sketches all of it — see [`docs/brand/`](docs/brand/)
+for the full 800×480 screen set this is being built against.
+
+---
+
+## Screens
+
+| | | |
+| --- | --- | --- |
+| <img src="docs/brand/screens/overview.png" alt="Ambient overview" width="250"> | <img src="docs/brand/screens/overview-night.png" alt="Night overview" width="250"> | <img src="docs/brand/screens/agenda-next-only.png" alt="Agenda" width="250"> |
+| **Ambient overview** | **Night** | **Agenda** |
+| <img src="docs/brand/screens/critical-fire.png" alt="Fire alert" width="250"> | <img src="docs/brand/screens/detail-co2.png" alt="Carbon dioxide detail" width="250"> | <img src="docs/brand/screens/maintenance-queue.png" alt="Maintenance queue" width="250"> |
+| **Alerts that escalate** | **Air quality** | **Maintenance queue** |
+
+---
+
+## Brand
 
 Design source of truth: the **Screensight · Brand & Interface** Figma design
 system, mirrored locally under [`docs/brand/`](docs/brand/) (palette, type ramp,
@@ -48,7 +82,132 @@ Light surfaces use paper `#FAF7F2`. The mark is the **European bee-eater**
 
 ---
 
-## How it works
+## Getting started
+
+This repository contains two components:
+
+| Component | Path | Language |
+| --- | --- | --- |
+| Device daemon + control CLI | `device/` | Rust (GPUI/V3D) |
+| Home Assistant custom integration | `custom_components/screensight/` | Python (HACS) |
+
+### Build the device (host)
+
+The daemon and CLI build and test on any machine with no GPU and no system
+graphics libraries, because GPUI is an optional `gui` feature:
+
+```sh
+make device            # headless daemon + CLI (host)
+make test-device       # Rust unit + integration tests
+make device-gui        # full renderer (needs libxkbcommon, freetype, wayland/xcb)
+make check-gui         # type-check the renderer without linking
+```
+
+Cross-compile for the Pi (aarch64):
+
+```sh
+docker build -t screensight-cross-aarch64:latest deploy/cross-image
+make cross             # cross build --release --features gui
+```
+
+### Package for Raspberry Pi OS
+
+```sh
+make deb                       # builds screensight_<version>_arm64.deb
+PI=remy@172.27.1.58 make deploy   # build + install over SSH
+```
+
+The `.deb` installs `screensightd`, the `screensight` CLI, the systemd units
+and the transparent cursor theme, and depends on `cage` and `avahi-daemon`.
+On install it enables and starts:
+
+* `cage.service` — the idle Wayland kiosk compositor;
+* `screensight.socket` — the control socket, passed to the daemon as fd 3;
+* `screensightd.service` — the daemon, which opens its window on cage.
+
+The units are `WantedBy=multi-user.target`, so the panel comes back by itself on
+reboot (the Pi boots headless, with no desktop session). To hand the panel back
+to the old Home Assistant kiosk:
+
+```sh
+./deploy/restore-kiosk.sh
+```
+
+### Control CLI
+
+The panel has no physical buttons, so everything is managed over SSH through the
+control socket:
+
+```sh
+screensight status              # identity, pairing window, paired instances
+screensight pair                # open/re-arm the pairing window
+screensight cancel-pair         # close the window without pairing
+screensight unpair <id>         # forget one instance
+screensight unpair --all        # forget every instance
+screensight select <id>         # choose which instance drives the display
+```
+
+### Home Assistant integration
+
+Install it as a HACS custom repository (`hacs.json` at the repo root), or copy
+`custom_components/screensight/` into your Home Assistant `config` directory.
+
+* Discovery and setup are automatic: the code form appears when the device is in
+  pairing mode.
+* The device exposes a **Display text** `text` entity; setting it updates the
+  panel.
+* The connection manager re-resolves the device by its mDNS name across IP
+  changes, so DHCP changes do not require re-pairing.
+* Supports `en`, `fr`, `de`, `es`, `it`, `pt`, `nl` and every other locale Home
+  Assistant ships (see `custom_components/screensight/translations/`).
+
+**Testing the Home Assistant side locally (recommended).** Never test against
+production. Two throwaway pieces on the same machine give you the whole loop
+without a Raspberry Pi:
+
+```sh
+# Terminal 1 — a disposable Home Assistant Core (started in the background and
+# onboarded automatically; there is no setup wizard)
+make ha-dev            # start + auto-onboard; UI at http://localhost:8123
+make ha-dev-logs       # follow logs (Ctrl+C just stops following)
+make ha-dev-stop       # stop and remove the container
+make ha-dev-reset      # wipe config and start fresh (use if login ever fails)
+
+# Terminal 2 — the device daemon + panel on your desktop ("emulated Pi")
+make emulate           # or ./scripts/emulate-device.sh
+```
+
+`make ha-dev` runs `ghcr.io/home-assistant/home-assistant:stable` with
+`network_mode: host` — required so zeroconf can see the device — binds the
+integration and a scratch `configuration.yaml` under `.dev/`, and completes
+onboarding over HA's own API. Log in with **`dev` / `dev`**. Then open
+**Settings → Devices & Services → Add Integration → Screensight**, read the code
+off the emulated panel and confirm on it.
+
+The container is managed through `docker compose` and runs detached, so it never
+traps your shell; `Ctrl+C` during `make ha-dev-logs` only stops the log stream.
+
+To drive the device without Home Assistant at all:
+
+```sh
+uv run --no-project scripts/fake-ha.py pair                     # reads the SAS from the panel
+uv run --no-project scripts/fake-ha.py text "hello from the CLI"
+```
+
+For a fully offline device-only run:
+
+```sh
+make run-headless
+SCREENSIGHT_CONTROL_SOCKET=/tmp/opencode/screensight-state/control.sock ./target/debug/screensight status
+```
+
+Once it works locally, install the `.deb` on the Pi (`make deploy`) and pair your
+production Home Assistant from the panel. The dev instance can stay paired at the
+same time; use `screensight select` to choose which one is displayed.
+
+---
+
+## Under the hood
 
 ```
 ┌───────────────────────────┐        mDNS  _screensight._tcp        ┌──────────────────────┐
@@ -96,9 +255,7 @@ The renderer CPU-rasterises the whole 800×480 frame (fonts, Unicode shaping,
 emoji fallback) and blits it through GPUI as a single image. This deliberately
 avoids GPUI's glyph-atlas text layer, which hangs the Pi's V3D GPU.
 
----
-
-## Repository layout
+### Repository layout
 
 ```
 device/                     Rust device daemon + `screensight` CLI
@@ -121,127 +278,7 @@ live on `feature/*`.
 
 ---
 
-## Building the device
-
-The daemon and CLI build and test on any machine with no GPU and no system
-graphics libraries, because GPUI is an optional `gui` feature:
-
-```sh
-make device            # headless daemon + CLI (host)
-make test-device       # Rust unit + integration tests
-make device-gui        # full renderer (needs libxkbcommon, freetype, wayland/xcb)
-make check-gui         # type-check the renderer without linking
-```
-
-Cross-compile for the Pi (aarch64):
-
-```sh
-docker build -t screensight-cross-aarch64:latest deploy/cross-image
-make cross             # cross build --release --features gui
-```
-
-### Package for Raspberry Pi OS
-
-```sh
-make deb                       # builds screensight_<version>_arm64.deb
-PI=remy@172.27.1.58 make deploy   # build + install over SSH
-```
-
-The `.deb` installs `screensightd`, the `screensight` CLI, the systemd units
-and the transparent cursor theme, and depends on `cage` and `avahi-daemon`.
-On install it starts:
-
-* `cage.service` — the idle Wayland kiosk compositor;
-* `screensight.socket` — the control socket, passed to the daemon as fd 3;
-* `screensightd.service` — the daemon, which opens its window on cage.
-
-To hand the panel back to the old Home Assistant kiosk:
-
-```sh
-./deploy/restore-kiosk.sh
-```
-
-### Control CLI
-
-The panel has no physical buttons, so everything is managed over SSH through the
-control socket:
-
-```sh
-screensight status              # identity, pairing window, paired instances
-screensight pair                # open/re-arm the pairing window
-screensight cancel-pair         # close the window without pairing
-screensight unpair <id>         # forget one instance
-screensight unpair --all        # forget every instance
-screensight select <id>         # choose which instance drives the display
-```
-
----
-
-## Home Assistant integration
-
-Install it as a HACS custom repository (`hacs.json` at the repo root), or copy
-`custom_components/screensight/` into your Home Assistant `config` directory.
-
-* Discovery and setup are automatic: the code form appears when the device is in
-  pairing mode.
-* The device exposes a **Display text** `text` entity; setting it updates the
-  panel.
-* The connection manager re-resolves the device by its mDNS name across IP
-  changes, so DHCP changes do not require re-pairing.
-* Supports `en`, `fr`, `de`, `es`, `it`, `pt`, `nl` and every other locale Home
-  Assistant ships (see `custom_components/screensight/translations/`).
-
-### Testing the Home Assistant side locally (recommended)
-
-**Never test against production.** Two throwaway pieces on the same machine give
-you the whole loop without a Raspberry Pi:
-
-```sh
-# Terminal 1 — a disposable Home Assistant Core (started in the background and
-# onboarded automatically; there is no setup wizard)
-make ha-dev            # start + auto-onboard; UI at http://localhost:8123
-make ha-dev-logs       # follow logs (Ctrl+C just stops following)
-make ha-dev-stop       # stop and remove the container
-make ha-dev-reset      # wipe config and start fresh (use if login ever fails)
-
-# Terminal 2 — the device daemon + panel on your desktop ("emulated Pi")
-make emulate           # or ./scripts/emulate-device.sh
-```
-
-`make ha-dev` runs `ghcr.io/home-assistant/home-assistant:stable` with
-`network_mode: host` — required so zeroconf can see the device — binds the
-integration and a scratch `configuration.yaml` under `.dev/`, and completes
-onboarding over HA's own API. Log in with **`dev` / `dev`**. Then open
-**Settings → Devices & Services → Add Integration → Screensight**, read the code
-off the emulated panel and confirm on it.
-
-The container is managed through `docker compose` and runs detached, so it never
-traps your shell; `Ctrl+C` during `make ha-dev-logs` only stops the log stream.
-
-To drive the device without Home Assistant at all:
-
-```sh
-uv run --no-project scripts/fake-ha.py pair                     # reads the SAS from the panel
-uv run --no-project scripts/fake-ha.py text "hello from the CLI"
-```
-
-For a fully offline device-only run:
-
-```sh
-make run-headless
-SCREENSIGHT_CONTROL_SOCKET=/tmp/opencode/screensight-state/control.sock ./target/debug/screensight status
-```
-
-### Running against the real Pi
-
-Once the PoC is validated locally, install the `.deb` on the Pi
-(`make deploy`) and pair your production Home Assistant from the panel. The dev
-instance can stay paired at the same time; use `screensight select` to choose
-which one is displayed.
-
----
-
-## Tests and CI
+## Tests & CI
 
 ```sh
 make test        # Rust + Home Assistant

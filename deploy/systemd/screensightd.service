@@ -10,6 +10,11 @@ After=cage.service
 
 [Service]
 Type=simple
+# cage.service is Type=simple, so systemd reports it "started" before it has
+# created its Wayland socket. Racing that, GPUI panics with `NoCompositor` and
+# the daemon has to restart. Wait for the socket first so the first boot attempt
+# succeeds (bounded to 20s by `timeout`).
+ExecStartPre=/usr/bin/timeout 20 /bin/sh -c 'until [ -S /run/screensight-wl/wayland-0 ]; do sleep 0.2; done'
 # No --headless: the device package is built with the `gui` feature.
 ExecStart=/usr/bin/screensightd
 Environment=WAYLAND_DISPLAY=wayland-0

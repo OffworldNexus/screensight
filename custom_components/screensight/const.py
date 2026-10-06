@@ -7,7 +7,7 @@ from typing import Final
 from homeassistant.const import Platform
 
 DOMAIN: Final = "screensight"
-MANUFACTURER: Final = "Screensight"
+MANUFACTURER: Final = "Offworld Nexus"
 DEFAULT_MODEL: Final = "Screensight"
 
 PLATFORMS: Final = [Platform.TEXT]
