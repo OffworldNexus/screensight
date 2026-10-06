@@ -75,6 +75,11 @@ sea-orm = { version = "2.0.3", default-features = false, features = [
     "runtime-tokio",
     "macros",
 ] }
+# Ordered, recorded schema changes; no CLI is needed on the device.
+sea-orm-migration = { version = "2.0.3", default-features = false, features = [
+    "sqlx-sqlite",
+    "runtime-tokio",
+] }
 # Feature-only dependency: `sqlite-bundled` compiles SQLite from source through
 # the sqlx facade. There is no aarch64 libsqlite3-dev in the cross image, so the
 # system library cannot be used. We never call sqlx directly.

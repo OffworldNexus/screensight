@@ -5,7 +5,7 @@
 //! dashboard values). The connection is owned by a background writer task; the
 //! runtime only sends it [`PersistCommand`]s, so writes never block the panel.
 //!
-//! SeaORM creates the initial schema directly from the entities on first boot.
+//! Numbered SeaORM migrations create and evolve the schema on startup.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -14,12 +14,14 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Schema, Set};
+use sea_orm::{ConnectOptions, Database, DatabaseConnection, Set};
+use sea_orm_migration::MigratorTrait;
 use sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
 use crate::identity::{DeviceIdentity, DeviceKeys};
+use crate::migration::Migrator;
 use crate::store::{PairedInstance, PersistCommand, Snapshot};
 
 mod entity {
@@ -119,25 +121,10 @@ async fn connect(url: &str) -> Result<DatabaseConnection> {
     let db = Database::connect(options)
         .await
         .with_context(|| format!("opening sqlite database {url}"))?;
-    create_schema(&db).await?;
+    Migrator::up(&db, None)
+        .await
+        .context("applying database migrations")?;
     Ok(db)
-}
-
-/// Create missing tables without duplicating the entity definitions or touching
-/// persisted identities, pairings and dashboard values on subsequent boots.
-async fn create_schema(db: &DatabaseConnection) -> Result<()> {
-    let backend = db.get_database_backend();
-    let schema = Schema::new(backend);
-    for mut table in [
-        schema.create_table_from_entity(entity::device::Entity),
-        schema.create_table_from_entity(entity::instance::Entity),
-        schema.create_table_from_entity(entity::kv::Entity),
-    ] {
-        db.execute_raw(backend.build(table.if_not_exists()))
-            .await
-            .context("creating database schema")?;
-    }
-    Ok(())
 }
 
 /// Load the device identity (generating it on first boot) and all paired
@@ -369,8 +356,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Schema initialization is idempotent and never clears paired state.
-        create_schema(&db).await.unwrap();
+        // Re-running migrations never clears paired state.
+        Migrator::up(&db, None).await.unwrap();
         let loaded = load_snapshot(&db, "x", "y").await.unwrap();
         assert_eq!(loaded.instances.len(), 1);
         assert_eq!(loaded.selected.as_deref(), Some("ha1"));
@@ -387,7 +374,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_database_uses_wal_and_foreign_keys() {
-        use sea_orm::{DatabaseBackend, Statement};
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
         let dir = std::env::temp_dir().join(format!(
             "screensight-db-wal-{}-{}",

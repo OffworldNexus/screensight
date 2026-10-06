@@ -55,6 +55,12 @@ all 800×480 device screens, bundled fonts).
   Assistant pushes per-key dashboard values (`set_value`, or a full `set_state`
   on reconnect); the device stores them per paired instance and renders the
   selected one. Components subscribe to the keys they need (see `state.rs`).
+* **Persistence** — SQLite schema changes use ordered `sea-orm-migration`
+  migrations in `device/src/migration/`, starting with
+  `m000001_create_tables.rs`. Startup applies pending migrations and records
+  them in `seaql_migrations`. Add future migrations to the `Migrator` list;
+  keep applied migration definitions unchanged rather than generating them
+  from evolving runtime entities.
 
 The renderer CPU-rasterises the whole 800×480 frame (fonts, Unicode shaping,
 emoji fallback) and blits it through GPUI as a single image. This deliberately

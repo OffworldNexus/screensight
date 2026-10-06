@@ -9,6 +9,7 @@ pub mod control;
 pub mod db;
 pub mod identity;
 pub mod mdns;
+pub mod migration;
 pub mod names;
 pub mod noise;
 pub mod pairing;
