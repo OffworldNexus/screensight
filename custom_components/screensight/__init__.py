@@ -6,10 +6,11 @@ from typing import TYPE_CHECKING
 
 from .connection import ScreensightConnection
 from .const import (
+    CONF_DEVICE_STATIC_KEY,
+    CONF_HA_PRIVATE_KEY,
     CONF_HOST,
     CONF_PORT,
     CONF_SERVICE_NAME,
-    CONF_TOKEN,
     DOMAIN,
     PLATFORMS,
 )
@@ -21,12 +22,20 @@ if TYPE_CHECKING:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a Screensight device from a config entry."""
+    private_hex = entry.data.get(CONF_HA_PRIVATE_KEY)
+    device_static_hex = entry.data.get(CONF_DEVICE_STATIC_KEY)
+    if not private_hex or not device_static_hex:
+        # A pre-Noise (token) entry cannot be upgraded; prompt a re-pair.
+        entry.async_start_reauth(hass)
+        return False
+
     connection = ScreensightConnection(
         hass,
         entry,
         host=entry.data[CONF_HOST],
         port=entry.data[CONF_PORT],
-        token=entry.data[CONF_TOKEN],
+        ha_private=bytes.fromhex(private_hex),
+        device_static=bytes.fromhex(device_static_hex),
         service_name=entry.data.get(CONF_SERVICE_NAME),
     )
     await connection.async_start()

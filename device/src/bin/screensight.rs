@@ -28,7 +28,8 @@ struct Cli {
 enum Command {
     /// Show identity, pairing window and paired Home Assistant instances.
     Status,
-    /// Open (or re-arm) the pairing window and print the panel code.
+    /// Open (or re-arm) the pairing window. The SAS appears on the panel once
+    /// Home Assistant connects.
     Pair,
     /// Close the pairing window without pairing.
     CancelPair,
@@ -95,9 +96,9 @@ fn print_status(status: &StatusReport) {
     println!("  id:         {}", status.id);
     println!("  name:       {}", status.name);
     if status.pairing {
-        match &status.pairing_code {
-            Some(code) => println!("  pairing:    OPEN — code {code}"),
-            None => println!("  pairing:    OPEN"),
+        match &status.sas {
+            Some(sas) => println!("  pairing:    OPEN — code {sas}"),
+            None => println!("  pairing:    OPEN — waiting for Home Assistant"),
         }
     } else {
         println!("  pairing:    closed");

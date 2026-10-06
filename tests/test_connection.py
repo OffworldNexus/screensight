@@ -1,9 +1,8 @@
-"""Tests for the Screensight WebSocket connection manager."""
+"""Tests for the Screensight Noise WebSocket connection manager."""
 
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -13,13 +12,25 @@ from zeroconf import ServiceStateChange
 
 from custom_components.screensight import connection as connection_module
 from custom_components.screensight.connection import (
+    ScreensightAuthError,
     ScreensightConnection,
     ScreensightConnectionError,
 )
-from custom_components.screensight.const import CONF_DEVICE_ID, CONF_HOST, DOMAIN
-from tests.helpers import SERVICE_NAME, FakeClientSession, FakeWebSocket
-
-_TOKEN = "tok"
+from custom_components.screensight.const import (
+    CONF_DEVICE_ID,
+    CONF_HOST,
+    DOMAIN,
+)
+from tests.helpers import (
+    DEVICE_STATIC_KEY,
+    HA_PRIVATE_KEY,
+    SERVICE_NAME,
+    TAG,
+    FakeClientSession,
+    FakeNoiseTransport,
+    FakeWebSocket,
+    dec,
+)
 
 
 def _connection(hass, *, service_name: str | None = None):
@@ -37,14 +48,20 @@ def _connection(hass, *, service_name: str | None = None):
         entry,
         host="192.168.1.50",
         port=8765,
-        token=_TOKEN,
+        ha_private=bytes.fromhex(HA_PRIVATE_KEY),
+        device_static=bytes.fromhex(DEVICE_STATIC_KEY),
         service_name=service_name,
     )
     return connection, entry
 
 
 def _patch_session(monkeypatch: pytest.MonkeyPatch, ws: object) -> None:
-    """Route ``async_get_clientsession`` to a fake session."""
+    """Route the client session and Noise transport to fakes."""
+    FakeNoiseTransport.instances = []
+    monkeypatch.setattr(
+        "custom_components.screensight.connection.NoiseTransport",
+        FakeNoiseTransport,
+    )
     monkeypatch.setattr(
         "homeassistant.helpers.aiohttp_client.async_get_clientsession",
         lambda *args, **kwargs: FakeClientSession(ws),
@@ -64,16 +81,17 @@ async def test_backoff_delay_grows_and_caps(hass) -> None:
     assert connection._backoff_delay() == 60.0
 
 
-async def test_set_value_sends_frame(hass) -> None:
-    """``async_set_value`` writes the exact protocol frame and caches it."""
+async def test_set_value_sends_encrypted_frame(hass) -> None:
+    """``async_set_value`` encrypts the exact protocol frame and caches it."""
     connection, _ = _connection(hass)
     ws = FakeWebSocket()
     connection._ws = ws
+    connection._transport = FakeNoiseTransport()
     connection._set_connected(True)
 
     await connection.async_set_value("text", "Hello 🌧")
 
-    assert ws.sent == [{"type": "set_value", "key": "text", "value": "Hello 🌧"}]
+    assert dec(ws.sent[0]) == {"type": "set_value", "key": "text", "value": "Hello 🌧"}
     assert connection.value("text") == "Hello 🌧"
     assert connection.available is True
 
@@ -105,26 +123,32 @@ async def test_state_frame_notifies_listeners(hass) -> None:
     assert calls == [1]
 
 
+async def test_unknown_key_raises_auth_error(hass) -> None:
+    """An ``unknown static key`` error is surfaced as an auth failure."""
+    connection, _ = _connection(hass)
+    with pytest.raises(ScreensightAuthError):
+        await connection._async_handle_message(
+            {"type": "error", "message": "unknown static key: pair again"}
+        )
+
+
 async def test_connect_resends_desired_state(hass, monkeypatch) -> None:
     """On (re)connect the values Home Assistant holds are re-sent."""
     connection, _ = _connection(hass)
     connection._desired = {"text": "keep"}
-    ws = FakeWebSocket([aiohttp.ClientConnectionError("down")])
+    ws = FakeWebSocket([b"m2", aiohttp.ClientConnectionError("down")])
     _patch_session(monkeypatch, ws)
-    with pytest.raises(aiohttp.ClientConnectionError):
+    with pytest.raises((ScreensightConnectionError, aiohttp.ClientConnectionError)):
         await connection._connect_and_listen()
-    assert {"type": "set_state", "values": {"text": "keep"}} in ws.sent
+    assert {"type": "set_state", "values": {"text": "keep"}} in [
+        dec(blob) for blob in ws.sent if blob.startswith(TAG)
+    ]
 
 
 async def test_run_reconnects_with_growing_backoff(hass, monkeypatch) -> None:
     """A failing socket is retried with 1s, 2s, 4s, ... delays."""
     connection, _ = _connection(hass)
-    monkeypatch.setattr(
-        "homeassistant.helpers.aiohttp_client.async_get_clientsession",
-        lambda *args, **kwargs: FakeClientSession(
-            aiohttp.ClientConnectionError("down")
-        ),
-    )
+    _patch_session(monkeypatch, aiohttp.ClientConnectionError("down"))
     delays: list[float] = []
 
     async def _sleep(delay: float) -> None:
@@ -141,13 +165,15 @@ async def test_run_reconnects_with_growing_backoff(hass, monkeypatch) -> None:
 async def test_read_loop_drops_after_missing_heartbeats(hass, monkeypatch) -> None:
     """Two missed heartbeats tear the socket down."""
     connection, _ = _connection(hass)
+    connection._transport = FakeNoiseTransport()
     monkeypatch.setattr(connection_module, "HEARTBEAT_INTERVAL", 0.01)
     ws = FakeWebSocket([])
+    connection._ws = ws
 
     with pytest.raises(ScreensightConnectionError):
         await connection._async_read_loop(ws)
 
-    assert {"type": "ping"} in ws.sent
+    assert {"type": "ping"} in [dec(blob) for blob in ws.sent]
 
 
 async def test_resolve_host_updates_entry_from_zeroconf(hass, monkeypatch) -> None:
@@ -162,6 +188,8 @@ async def test_resolve_host_updates_entry_from_zeroconf(hass, monkeypatch) -> No
     class _Zeroconf:
         async def async_get_service_info(self, type_: str, name: str) -> _Info:
             return _Info()
+
+    from unittest.mock import AsyncMock
 
     monkeypatch.setattr(
         "homeassistant.components.zeroconf.async_get_async_instance",

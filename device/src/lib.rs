@@ -10,6 +10,7 @@ pub mod db;
 pub mod identity;
 pub mod mdns;
 pub mod names;
+pub mod noise;
 pub mod pairing;
 pub mod protocol;
 pub mod random;

@@ -17,13 +17,22 @@ CONF_DEVICE_ID: Final = "device_id"
 CONF_NAME: Final = "name"
 CONF_HOST: Final = "host"
 CONF_PORT: Final = "port"
-CONF_TOKEN: Final = "token"  # noqa: S105 -- config key, not a secret value
+#: The device's static Noise public key (hex), learned at pairing.
+CONF_DEVICE_STATIC_KEY: Final = "device_static_key"
+#: Home Assistant's own static Noise keypair (hex), generated once per entry.
+CONF_HA_PRIVATE_KEY: Final = "ha_private_key"
+CONF_HA_PUBLIC_KEY: Final = "ha_public_key"
 CONF_HA_ID: Final = "ha_id"
 CONF_HA_NAME: Final = "ha_name"
+#: Form field for the 8-digit SAS the user reads off the panel.
 CONF_CODE: Final = "code"
 CONF_MODEL: Final = "model"
 CONF_VERSION: Final = "version"
 CONF_SERVICE_NAME: Final = "service_name"
+
+# The device rejects an IK reconnect from an unknown key with this phrase inside
+# the encrypted channel; the connection manager uses it to raise a repair flow.
+UNKNOWN_KEY_MARKER: Final = "unknown static key"
 
 # mDNS / transport defaults.
 SERVICE_TYPE: Final = "_screensight._tcp.local."

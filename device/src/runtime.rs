@@ -1,6 +1,7 @@
-//! Shared daemon runtime: identity, the four-state screen machine, per-instance
-//! dashboard state and persistence, behind interior mutability so the control
-//! socket, the WebSocket server and the renderer can all share one `Arc<Runtime>`.
+//! Shared daemon runtime: identity, the pairing/Noise screen machine,
+//! per-instance dashboard state and persistence, behind interior mutability so
+//! the control socket, the WebSocket server and the renderer can all share one
+//! `Arc<Runtime>`.
 //!
 //! The runtime is deliberately free of async and GPU types: it is the testable
 //! core that every transport drives. A [`Notify`] wakes the panel loop whenever
@@ -13,13 +14,13 @@ use std::time::Instant;
 use anyhow::Result;
 use tokio::sync::Notify;
 
-use crate::identity::DeviceIdentity;
-use crate::pairing::{PairingManager, SubmitOutcome};
+use crate::identity::{DeviceIdentity, DeviceKeys};
+use crate::pairing::PairingManager;
 use crate::protocol::{PairRejection, PairedSummary, StatusReport};
 use crate::state::StateManager;
 use crate::store::{new_instance, PairedInstance, Persistence, Snapshot, Store};
 
-/// A pairing whose code was accepted and is waiting for the on-panel
+/// A pairing whose SAS matched and which is waiting for the on-panel
 /// "Pair" / "Cancel" decision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingPair {
@@ -29,7 +30,17 @@ pub struct PendingPair {
     pub ha_name: String,
 }
 
-/// What the panel should show right now. The device has exactly four faces.
+/// State of one in-flight Noise XX pairing, once the handshake has completed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairingSession {
+    /// Home Assistant's static Noise public key, hex-encoded, learned from the
+    /// handshake. Becomes the credential stored on confirmation.
+    pub ha_static_key: String,
+    /// The 8-digit SAS derived from the handshake, shown on the panel.
+    pub sas: String,
+}
+
+/// What the panel should show right now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {
     /// Paired, but Home Assistant has not been heard from since boot: the
@@ -37,21 +48,62 @@ pub enum Screen {
     Splash { name: String },
     /// Not paired and no pairing window open.
     Idle,
-    /// A pairing window is open, waiting for Home Assistant to submit the code.
-    Pairing { code: String, name: String },
-    /// The code was accepted; waiting for the user to approve on the panel.
+    /// Pairing window open, waiting for Home Assistant to connect (loader).
+    PairingWaiting { name: String },
+    /// XX handshake in progress ("Exchanging keys…", loader).
+    PairingHandshake { name: String },
+    /// XX complete; the SAS the user must type into Home Assistant.
+    PairingCode { sas: String },
+    /// The SAS matched and Home Assistant named itself; panel approval.
     Confirm { ha_name: String },
+    /// Any pairing failure: one generic error screen with a retry action.
+    PairingError,
     /// Paired: the dashboard, driven by the selected instance's values.
     Dashboard { values: BTreeMap<String, String> },
+}
+
+impl Screen {
+    /// The coarse "view" identity, ignoring any animation phase. Two frames with
+    /// the same view key must not trigger a CRT transition, even if the loader's
+    /// pixels differ.
+    #[must_use]
+    pub fn view_key(&self) -> u8 {
+        match self {
+            Self::Splash { .. } => 0,
+            Self::Idle => 1,
+            Self::PairingWaiting { .. } => 2,
+            Self::PairingHandshake { .. } => 3,
+            Self::PairingCode { .. } => 4,
+            Self::Confirm { .. } => 5,
+            Self::PairingError => 6,
+            Self::Dashboard { .. } => 7,
+        }
+    }
+
+    /// Whether the panel must keep repainting this screen for its animation.
+    #[must_use]
+    pub fn is_animated(&self) -> bool {
+        matches!(
+            self,
+            Self::PairingWaiting { .. } | Self::PairingHandshake { .. }
+        )
+    }
 }
 
 /// Shared runtime state.
 pub struct Runtime {
     identity: DeviceIdentity,
+    keys: DeviceKeys,
     store: Mutex<Store>,
     persist: Arc<dyn Persistence>,
     pairing: Mutex<PairingManager>,
     pending: Mutex<Option<PendingPair>>,
+    /// The completed-but-unconfirmed XX pairing, if any.
+    session: Mutex<Option<PairingSession>>,
+    /// Whether an XX handshake is currently in progress (loader: handshake).
+    handshaking: Mutex<bool>,
+    /// Whether the current pairing window has recorded a failure (generic error).
+    pairing_error: Mutex<bool>,
     /// Why the last pending pairing ended, for the waiting Home Assistant.
     rejection: Mutex<Option<PairRejection>>,
     state: StateManager,
@@ -74,10 +126,14 @@ impl Runtime {
         let store = Store::new(snapshot.instances, snapshot.selected, Arc::clone(&persist));
         Self {
             identity: snapshot.identity,
+            keys: snapshot.keys,
             store: Mutex::new(store),
             persist,
             pairing: Mutex::new(PairingManager::new()),
             pending: Mutex::new(None),
+            session: Mutex::new(None),
+            handshaking: Mutex::new(false),
+            pairing_error: Mutex::new(false),
             rejection: Mutex::new(None),
             state,
             connected: Mutex::new(HashSet::new()),
@@ -96,11 +152,12 @@ impl Runtime {
         self.dirty.notify_one();
     }
 
-    /// Device identity accessor.
+    /// Device status, including the pairing SAS while a window is open.
     #[must_use]
     pub fn status(&self) -> StatusReport {
-        let pairing_code = self.pairing_code(Instant::now());
-        let pairing_open = pairing_code.is_some();
+        let now = Instant::now();
+        let pairing_open = self.pairing_open(now);
+        let sas = self.pairing_sas(now);
         let store = self.store.lock().expect("store mutex poisoned");
         let instances = store
             .instances()
@@ -117,7 +174,7 @@ impl Runtime {
             model: self.identity.model.clone(),
             version: self.identity.version.clone(),
             pairing: pairing_open,
-            pairing_code,
+            sas,
             instances,
             selected: store.selected().map(str::to_owned),
         }
@@ -129,19 +186,30 @@ impl Runtime {
         self.identity.clone()
     }
 
-    /// Open (or re-arm) the pairing window, returning the new code.
-    pub fn arm_pairing(&self) -> Result<String> {
+    /// The device's Noise static keypair.
+    #[must_use]
+    pub fn keys(&self) -> DeviceKeys {
+        self.keys.clone()
+    }
+
+    /// The device's static public key, hex-encoded (mDNS `key=`).
+    #[must_use]
+    pub fn public_key_hex(&self) -> String {
+        self.keys.public_hex()
+    }
+
+    /// Open (or re-arm) the pairing window and clear any previous attempt.
+    pub fn arm_pairing(&self) -> Result<()> {
         let now = Instant::now();
-        let code = self
-            .pairing
+        self.pairing
             .lock()
             .expect("pairing mutex poisoned")
-            .arm(now)?;
-        *self.pending.lock().expect("pending mutex poisoned") = None;
+            .arm(now);
+        self.reset_attempt();
         *self.rejection.lock().expect("rejection mutex poisoned") = None;
         log::info!("pairing window opened");
         self.mark_dirty();
-        Ok(code)
+        Ok(())
     }
 
     /// Close the pairing window without pairing, returning to idle.
@@ -150,9 +218,20 @@ impl Runtime {
             .lock()
             .expect("pairing mutex poisoned")
             .cancel();
-        *self.pending.lock().expect("pending mutex poisoned") = None;
+        self.reset_attempt();
         log::info!("pairing window closed");
         self.mark_dirty();
+    }
+
+    /// Clear all per-attempt pairing state (pending, session, flags).
+    fn reset_attempt(&self) {
+        *self.pending.lock().expect("pending mutex poisoned") = None;
+        *self.session.lock().expect("session mutex poisoned") = None;
+        *self.handshaking.lock().expect("handshaking mutex poisoned") = false;
+        *self
+            .pairing_error
+            .lock()
+            .expect("pairing_error mutex poisoned") = false;
     }
 
     /// Whether the pairing window is open at `now`.
@@ -164,59 +243,93 @@ impl Runtime {
             .is_open(now)
     }
 
-    /// The current pairing code, if the window is open.
+    /// The derived SAS while a handshake has completed in an open window.
     #[must_use]
-    pub fn pairing_code(&self, now: Instant) -> Option<String> {
-        self.pairing
+    pub fn pairing_sas(&self, now: Instant) -> Option<String> {
+        if !self.pairing_open(now) {
+            return None;
+        }
+        self.session
             .lock()
-            .expect("pairing mutex poisoned")
-            .code(now)
-            .map(str::to_owned)
+            .expect("session mutex poisoned")
+            .as_ref()
+            .map(|session| session.sas.clone())
     }
 
-    /// The pending (code-accepted, awaiting touch) pairing, if any.
+    /// The pending (SAS-matched, awaiting touch) pairing, if any.
     #[must_use]
     pub fn pending_pair(&self) -> Option<PendingPair> {
         self.pending.lock().expect("pending mutex poisoned").clone()
     }
 
-    /// Submit a pairing code. On success the pending pair is recorded.
-    pub fn submit_code(
-        &self,
-        ip: std::net::IpAddr,
-        code: &str,
-        ha_id: &str,
-        ha_name: &str,
-        now: Instant,
-    ) -> SubmitOutcome {
-        let outcome = self
-            .pairing
+    /// Mark that an XX handshake has started (loader: "Exchanging keys…").
+    pub fn begin_handshake(&self) {
+        *self.handshaking.lock().expect("handshaking mutex poisoned") = true;
+        *self
+            .pairing_error
             .lock()
-            .expect("pairing mutex poisoned")
-            .submit(ip, code, now);
-        if outcome == SubmitOutcome::Pending {
-            *self.pending.lock().expect("pending mutex poisoned") = Some(PendingPair {
-                ha_id: ha_id.to_owned(),
-                ha_name: ha_name.to_owned(),
-            });
-            log::info!("pairing code accepted; awaiting on-panel confirmation");
-            self.mark_dirty();
-        }
-        outcome
+            .expect("pairing_error mutex poisoned") = false;
+        self.mark_dirty();
     }
 
-    /// Confirm the pending pairing on the panel: mint a token, persist the
-    /// instance, select it if nothing is selected, and close the window.
+    /// Record a completed XX handshake and the SAS to display.
+    pub fn set_pairing_sas(&self, ha_static_key: &str, sas: &str) {
+        *self.session.lock().expect("session mutex poisoned") = Some(PairingSession {
+            ha_static_key: ha_static_key.to_owned(),
+            sas: sas.to_owned(),
+        });
+        *self.handshaking.lock().expect("handshaking mutex poisoned") = false;
+        log::info!("pairing handshake complete; SAS ready");
+        self.mark_dirty();
+    }
+
+    /// Record the authenticated pair request (SAS matched in Home Assistant).
+    pub fn accept_pair_request(&self, ha_id: &str, ha_name: &str) {
+        *self.pending.lock().expect("pending mutex poisoned") = Some(PendingPair {
+            ha_id: ha_id.to_owned(),
+            ha_name: ha_name.to_owned(),
+        });
+        log::info!("pair request accepted; awaiting on-panel confirmation");
+        self.mark_dirty();
+    }
+
+    /// Record that the current pairing attempt failed; the panel shows the one
+    /// generic error screen until the user starts over.
+    pub fn fail_pairing(&self) {
+        if !self.pairing_open(Instant::now()) {
+            return;
+        }
+        *self
+            .pairing_error
+            .lock()
+            .expect("pairing_error mutex poisoned") = true;
+        self.reset_attempt_but_keep_error();
+        log::warn!("pairing attempt failed");
+        self.mark_dirty();
+    }
+
+    /// Clear pending/session/handshaking without clearing the error flag.
+    fn reset_attempt_but_keep_error(&self) {
+        *self.pending.lock().expect("pending mutex poisoned") = None;
+        *self.session.lock().expect("session mutex poisoned") = None;
+        *self.handshaking.lock().expect("handshaking mutex poisoned") = false;
+    }
+
+    /// Confirm the pending pairing on the panel: persist the instance with Home
+    /// Assistant's static key, select it if nothing is selected, close the window.
     pub fn confirm_pairing(&self) -> Result<Option<PairedInstance>> {
         let Some(pending) = self.pending_pair() else {
             return Ok(None);
         };
-        let token = self
-            .pairing
-            .lock()
-            .expect("pairing mutex poisoned")
-            .mint_token()?;
-        let instance = new_instance(&pending.ha_id, &pending.ha_name, token, None);
+        let Some(session) = self.session.lock().expect("session mutex poisoned").clone() else {
+            return Ok(None);
+        };
+        let instance = new_instance(
+            &pending.ha_id,
+            &pending.ha_name,
+            session.ha_static_key,
+            None,
+        );
 
         {
             let mut store = self.store.lock().expect("store mutex poisoned");
@@ -232,14 +345,9 @@ impl Runtime {
 
     /// Decline the pending pairing and return to idle ("Cancel").
     pub fn reject_pairing(&self) {
-        *self.pending.lock().expect("pending mutex poisoned") = None;
         *self.rejection.lock().expect("rejection mutex poisoned") = Some(PairRejection::Declined);
-        self.pairing
-            .lock()
-            .expect("pairing mutex poisoned")
-            .cancel();
+        self.cancel_pairing();
         log::info!("pairing declined on the panel");
-        self.mark_dirty();
     }
 
     /// Take the reason the last pending pairing ended, if it was recorded.
@@ -254,15 +362,34 @@ impl Runtime {
             .take()
     }
 
-    /// Check the token presented on a WebSocket upgrade. Returns the instance.
+    /// Seconds until `ip` may attempt another handshake, if it is locked out.
     #[must_use]
-    pub fn authenticate(&self, token: &str) -> Option<PairedInstance> {
+    pub fn handshake_retry_after(&self, ip: std::net::IpAddr, now: Instant) -> Option<u64> {
+        self.pairing
+            .lock()
+            .expect("pairing mutex poisoned")
+            .retry_after(ip, now)
+    }
+
+    /// Record a failed handshake attempt from `ip`, returning the lockout
+    /// duration if this attempt tripped it.
+    pub fn record_handshake_failure(&self, ip: std::net::IpAddr, now: Instant) -> Option<u64> {
+        self.pairing
+            .lock()
+            .expect("pairing mutex poisoned")
+            .record_failure(ip, now)
+    }
+
+    /// Authenticate a peer by the static public key it presented. Returns the
+    /// paired instance, replacing the old bearer-token check.
+    #[must_use]
+    pub fn authenticate_by_static_key(&self, key_hex: &str) -> Option<PairedInstance> {
         self.store
             .lock()
             .expect("store mutex poisoned")
             .instances()
             .iter()
-            .find(|i| i.token == token)
+            .find(|i| i.ha_static_key == key_hex)
             .cloned()
     }
 
@@ -398,22 +525,48 @@ impl Runtime {
     /// Compute the screen to show at `now`.
     #[must_use]
     pub fn tick(&self, now: Instant) -> Screen {
-        if let Some(pending) = self.pending_pair() {
-            if self.pairing_open(now) {
+        if self.pairing_open(now) {
+            if *self
+                .pairing_error
+                .lock()
+                .expect("pairing_error mutex poisoned")
+            {
+                return Screen::PairingError;
+            }
+            if let Some(pending) = self.pending_pair() {
                 return Screen::Confirm {
                     ha_name: pending.ha_name,
                 };
             }
-            // The window lapsed while awaiting confirmation.
-            *self.pending.lock().expect("pending mutex poisoned") = None;
-        }
-
-        if self.pairing_open(now) {
-            let code = self.pairing_code(now).unwrap_or_default();
-            return Screen::Pairing {
-                code,
+            if let Some(sas) = self
+                .session
+                .lock()
+                .expect("session mutex poisoned")
+                .as_ref()
+                .map(|session| session.sas.clone())
+            {
+                return Screen::PairingCode { sas };
+            }
+            if *self.handshaking.lock().expect("handshaking mutex poisoned") {
+                return Screen::PairingHandshake {
+                    name: self.identity.name.clone(),
+                };
+            }
+            return Screen::PairingWaiting {
                 name: self.identity.name.clone(),
             };
+        }
+
+        // The window has lapsed: drop any half-finished attempt so the next one
+        // starts clean, then fall through to the steady-state screen.
+        if self.pending_pair().is_some()
+            || self
+                .session
+                .lock()
+                .expect("session mutex poisoned")
+                .is_some()
+        {
+            self.reset_attempt();
         }
 
         let selected = {
@@ -451,18 +604,42 @@ mod tests {
         Runtime::new(snapshot_with(identity), Arc::new(NoopPersistence))
     }
 
+    fn ip(n: u8) -> std::net::IpAddr {
+        std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, n))
+    }
+
+    /// Drive a full pairing: arm, XX complete with a SAS, then HA names itself.
+    fn pair(rt: &Runtime, id: &str, name: &str, key: &str) {
+        rt.arm_pairing().unwrap();
+        rt.begin_handshake();
+        rt.set_pairing_sas(key, "12345678");
+        rt.accept_pair_request(id, name);
+        rt.confirm_pairing().unwrap();
+    }
+
     #[test]
-    fn pairing_confirm_selects_first_instance() {
+    fn pairing_shows_loader_sas_confirm_then_selects_first_instance() {
         let rt = runtime();
         let now = Instant::now();
-        let code = rt.arm_pairing().unwrap();
-        assert!(matches!(rt.tick(now), Screen::Pairing { .. }));
+        rt.arm_pairing().unwrap();
 
-        let ip = std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
-        assert_eq!(
-            rt.submit_code(ip, &code, "ha1", "My home", now),
-            SubmitOutcome::Pending
-        );
+        // Window open, nothing yet: the waiting loader.
+        assert!(matches!(rt.tick(now), Screen::PairingWaiting { .. }));
+
+        // XX in flight: the handshake status variant.
+        rt.begin_handshake();
+        assert!(matches!(rt.tick(now), Screen::PairingHandshake { .. }));
+
+        // XX done: the SAS, and only then.
+        rt.set_pairing_sas(&"ab".repeat(32), "12345678");
+        assert!(matches!(
+            rt.tick(now),
+            Screen::PairingCode { sas } if sas == "12345678"
+        ));
+        assert_eq!(rt.pairing_sas(now).as_deref(), Some("12345678"));
+
+        // SAS matched in HA and it named itself: the confirmation.
+        rt.accept_pair_request("ha1", "My home");
         assert!(matches!(
             rt.tick(now),
             Screen::Confirm { ha_name } if ha_name == "My home"
@@ -470,7 +647,7 @@ mod tests {
 
         let instance = rt.confirm_pairing().unwrap().unwrap();
         assert_eq!(instance.ha_id, "ha1");
-        assert_eq!(instance.token.len(), 64);
+        assert_eq!(instance.ha_static_key, "ab".repeat(32));
         // Paired but not yet heard from: the panel holds on the splash.
         assert!(matches!(rt.tick(now), Screen::Splash { .. }));
         rt.set_connected("ha1", true);
@@ -482,12 +659,26 @@ mod tests {
     }
 
     #[test]
+    fn handshake_failure_shows_the_generic_error_until_rearm() {
+        let rt = runtime();
+        let now = Instant::now();
+        rt.arm_pairing().unwrap();
+        rt.begin_handshake();
+        rt.fail_pairing();
+        assert_eq!(rt.tick(now), Screen::PairingError);
+
+        // Re-arming the window clears the error and returns to the loader.
+        rt.arm_pairing().unwrap();
+        assert!(matches!(rt.tick(now), Screen::PairingWaiting { .. }));
+    }
+
+    #[test]
     fn decline_returns_to_idle() {
         let rt = runtime();
         let now = Instant::now();
-        let code = rt.arm_pairing().unwrap();
-        let ip = std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
-        rt.submit_code(ip, &code, "ha1", "Home", now);
+        rt.arm_pairing().unwrap();
+        rt.set_pairing_sas(&"ab".repeat(32), "12345678");
+        rt.accept_pair_request("ha1", "Home");
         assert!(matches!(rt.tick(now), Screen::Confirm { .. }));
 
         rt.reject_pairing();
@@ -507,16 +698,27 @@ mod tests {
     }
 
     #[test]
-    fn wrong_code_is_not_pending() {
+    fn authenticate_by_static_key_matches_only_paired_keys() {
+        let rt = runtime();
+        let key = "cd".repeat(32);
+        pair(&rt, "ha1", "Home", &key);
+        assert_eq!(rt.authenticate_by_static_key(&key).unwrap().ha_id, "ha1");
+        assert!(rt.authenticate_by_static_key(&"ef".repeat(32)).is_none());
+    }
+
+    #[test]
+    fn handshake_attempts_are_rate_limited_per_address() {
         let rt = runtime();
         let now = Instant::now();
         rt.arm_pairing().unwrap();
-        let ip = std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
-        assert!(matches!(
-            rt.submit_code(ip, "000000", "ha1", "Home", now),
-            SubmitOutcome::InvalidCode { .. }
-        ));
-        assert!(rt.pending_pair().is_none());
+        for _ in 0..crate::pairing::MAX_FAILURES_PER_IP {
+            rt.record_handshake_failure(ip(7), now);
+        }
+        assert!(rt.handshake_retry_after(ip(7), now).is_some());
+        // A different address is unaffected; the lockout expires.
+        assert!(rt.handshake_retry_after(ip(8), now).is_none());
+        let later = now + crate::pairing::LOCKOUT + std::time::Duration::from_secs(1);
+        assert!(rt.handshake_retry_after(ip(7), later).is_none());
     }
 
     #[test]
@@ -524,10 +726,7 @@ mod tests {
         let rt = runtime();
         let now = Instant::now();
         for (id, name) in [("ha1", "Home"), ("ha2", "Dev")] {
-            let code = rt.arm_pairing().unwrap();
-            let ip = std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-            rt.submit_code(ip, &code, id, name, now);
-            rt.confirm_pairing().unwrap();
+            pair(&rt, id, name, &format!("{id:0>64}"));
         }
         assert_eq!(rt.status().instances.len(), 2);
 
@@ -552,10 +751,7 @@ mod tests {
     fn splash_shows_until_home_assistant_is_heard_from() {
         let rt = runtime();
         let now = Instant::now();
-        let code = rt.arm_pairing().unwrap();
-        let ip = std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        rt.submit_code(ip, &code, "ha1", "Home", now);
-        rt.confirm_pairing().unwrap();
+        pair(&rt, "ha1", "Home", &"ab".repeat(32));
 
         // Paired, but quiet: the splash, not an empty dashboard.
         assert!(matches!(rt.tick(now), Screen::Splash { .. }));

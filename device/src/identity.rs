@@ -46,6 +46,43 @@ impl DeviceIdentity {
     }
 }
 
+/// The device's long-lived Noise static keypair.
+///
+/// The public half is the device's cryptographic identity — it is advertised
+/// over mDNS (`key=`) and stored by Home Assistant at pairing time. The private
+/// half is generated on first boot, persisted locally and never leaves the
+/// device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceKeys {
+    /// X25519 static private key (32 bytes).
+    pub private: Vec<u8>,
+    /// X25519 static public key (32 bytes).
+    pub public: Vec<u8>,
+}
+
+impl DeviceKeys {
+    /// Generate a fresh keypair from OS randomness.
+    pub fn generate() -> Result<Self> {
+        let pair = crate::noise::generate_keypair().context("generating device static keys")?;
+        Ok(Self {
+            private: pair.private,
+            public: pair.public,
+        })
+    }
+
+    /// The public key as lower-case hex, for mDNS and persistence.
+    #[must_use]
+    pub fn public_hex(&self) -> String {
+        crate::noise::to_hex(&self.public)
+    }
+
+    /// The private key as lower-case hex, for persistence only.
+    #[must_use]
+    pub fn private_hex(&self) -> String {
+        crate::noise::to_hex(&self.private)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +102,18 @@ mod tests {
         // Entropy: two independent ids must not collide. Names are drawn from a
         // small word list, so a repeat is possible and deliberately not asserted.
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn device_keys_are_32_bytes_and_hex_round_trip() {
+        let keys = DeviceKeys::generate().unwrap();
+        assert_eq!(keys.public.len(), 32);
+        assert_eq!(keys.private.len(), 32);
+        assert_eq!(keys.public_hex().len(), 64);
+        assert_eq!(
+            crate::noise::from_hex(&keys.private_hex()).unwrap(),
+            keys.private
+        );
+        assert_ne!(keys.public, keys.private);
     }
 }

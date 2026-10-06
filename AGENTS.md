@@ -21,4 +21,4 @@ failures; pass an explicit timeout (≈2× the measured wall time).
 - **Single Python test**: `uv run pytest -q custom_components/... path::test_name`
 - **Everything**: `make lint` and `make test`
 
-Last measured: 2026-10-05 — Rust 52 passed (~0.7s; 47 unit + 1 WGSL validation + 4 WS integration), Python 31 passed (~2s).
+Last measured: 2026-10-06 — Rust 66 passed (~1s; 60 unit + 1 WGSL validation + 5 WS integration), Python 37 passed (~1s).

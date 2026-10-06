@@ -7,9 +7,13 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.screensight.connection import ScreensightConnection
 from custom_components.screensight.const import CONF_DEVICE_ID, CONF_HOST, DOMAIN
 from custom_components.screensight.text import ScreensightText
-from tests.helpers import FakeWebSocket
-
-_TOKEN = "tok"
+from tests.helpers import (
+    DEVICE_STATIC_KEY,
+    HA_PRIVATE_KEY,
+    FakeNoiseTransport,
+    FakeWebSocket,
+    dec,
+)
 
 
 def _entity(hass):
@@ -23,10 +27,16 @@ def _entity(hass):
         },
     )
     connection = ScreensightConnection(
-        hass, entry, host="192.168.1.50", port=8765, token=_TOKEN
+        hass,
+        entry,
+        host="192.168.1.50",
+        port=8765,
+        ha_private=bytes.fromhex(HA_PRIVATE_KEY),
+        device_static=bytes.fromhex(DEVICE_STATIC_KEY),
     )
     ws = FakeWebSocket()
     connection._ws = ws
+    connection._transport = FakeNoiseTransport()
     connection._set_connected(True)
     return ScreensightText(connection, entry), connection, ws
 
@@ -37,7 +47,7 @@ async def test_set_value_sends_frame(hass) -> None:
 
     await entity.async_set_value("Hello 🌧")
 
-    assert ws.sent == [{"type": "set_value", "key": "text", "value": "Hello 🌧"}]
+    assert dec(ws.sent[0]) == {"type": "set_value", "key": "text", "value": "Hello 🌧"}
     assert entity.native_value == "Hello 🌧"
     assert connection.value("text") == "Hello 🌧"
 

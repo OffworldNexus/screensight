@@ -7,17 +7,17 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// A message sent by Home Assistant to the device over the WebSocket.
+///
+/// Frames travel encrypted inside the Noise transport (one binary WS frame per
+/// message); the device never sees the plaintext until the channel is
+/// authenticated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    /// Pairing request. `code` is the human-entered panel code; it is only
-    /// accepted while the pairing window is open and never appears on mDNS.
-    Pair {
-        device_id: String,
-        code: String,
-        ha_id: String,
-        ha_name: String,
-    },
+    /// Pairing request, sent only after the XX handshake and a matching SAS have
+    /// authenticated the channel. The device already knows Home Assistant's
+    /// static key from the handshake, so this only names it for the panel.
+    Pair { ha_id: String, ha_name: String },
     /// Set one dashboard value. Other values are left untouched.
     SetValue { key: String, value: String },
     /// Replace this instance's whole dashboard state. Sent on every
@@ -32,16 +32,16 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    /// The code was correct; the device is now waiting for the on-panel
+    /// Home Assistant named itself; the device is waiting for the on-panel
     /// confirmation.
     PairPending {
         device_id: String,
         name: String,
         ha_name: String,
     },
-    /// Pairing completed and a long-lived token was minted.
+    /// Pairing completed. No credential is returned: the mutual static keys
+    /// recorded on each side are the pairing.
     PairSuccess {
-        token: String,
         device_id: String,
         name: String,
         ha_id: String,
@@ -53,9 +53,6 @@ pub enum ServerMessage {
         reason: PairErrorReason,
         #[serde(skip_serializing_if = "Option::is_none")]
         retry_after_secs: Option<u64>,
-        /// Attempts remaining before this source is locked out.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        attempts_left: Option<u32>,
     },
     /// The authenticated instance's full dashboard state.
     State {
@@ -65,7 +62,7 @@ pub enum ServerMessage {
     },
     /// Reply to [`ClientMessage::Ping`].
     Pong,
-    /// A generic error (bad auth, malformed frame, ...).
+    /// A generic error (malformed frame, ...).
     Error { message: String },
 }
 
@@ -73,10 +70,10 @@ pub enum ServerMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairErrorReason {
-    InvalidCode,
-    RateLimited,
+    /// The pairing window was not open when the request arrived.
     WindowClosed,
-    WrongDevice,
+    /// The source address is locked out after too many failed handshakes.
+    RateLimited,
 }
 
 /// Why a pending pairing was abandoned.
@@ -165,9 +162,10 @@ pub struct StatusReport {
     pub version: String,
     /// Whether the pairing window is currently open.
     pub pairing: bool,
-    /// The current pairing code, if the window is open (local socket only).
+    /// The SAS derived from the current pairing handshake, if one has completed
+    /// (local socket only — never advertised over the network).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pairing_code: Option<String>,
+    pub sas: Option<String>,
     /// Paired instances.
     pub instances: Vec<PairedSummary>,
     pub selected: Option<String>,
@@ -189,8 +187,6 @@ mod tests {
     fn client_messages_round_trip() {
         let cases = [
             ClientMessage::Pair {
-                device_id: "abc".into(),
-                code: "123456".into(),
                 ha_id: "ha1".into(),
                 ha_name: "My home".into(),
             },
@@ -217,11 +213,21 @@ mod tests {
         let json = serde_json::to_string(&ServerMessage::PairError {
             reason: PairErrorReason::RateLimited,
             retry_after_secs: Some(30),
-            attempts_left: None,
         })
         .unwrap();
         assert!(json.contains("\"type\":\"pair_error\""));
         assert!(json.contains("\"reason\":\"rate_limited\""));
+    }
+
+    #[test]
+    fn pair_success_carries_no_credential() {
+        let json = serde_json::to_string(&ServerMessage::PairSuccess {
+            device_id: "d1".into(),
+            name: "Brave Otter".into(),
+            ha_id: "ha1".into(),
+        })
+        .unwrap();
+        assert!(!json.contains("token"));
     }
 
     #[test]

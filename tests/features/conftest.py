@@ -18,20 +18,26 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.screensight.connection import ScreensightConnection
 from custom_components.screensight.const import (
     CONF_DEVICE_ID,
+    CONF_DEVICE_STATIC_KEY,
+    CONF_HA_PRIVATE_KEY,
     CONF_HOST,
     CONF_NAME,
-    CONF_TOKEN,
     DOMAIN,
 )
 from custom_components.screensight.text import ScreensightText
 from tests.helpers import (
     DEVICE_ID,
-    TOKEN,
+    DEVICE_STATIC_KEY,
+    HA_PRIVATE_KEY,
     FakeClientSession,
+    FakeNoiseTransport,
     FakeWebSocket,
+    dec,
     make_discovery,
     pair_frames,
 )
+
+_HANDSHAKE_REPLY = b"handshake-response"
 
 
 @given(
@@ -40,7 +46,12 @@ from tests.helpers import (
 )
 def _advertising(hass, monkeypatch):
     """Discover a pairing device and park the flow on its code form."""
-    session = FakeClientSession(FakeWebSocket(pair_frames()))
+    FakeNoiseTransport.instances = []
+    monkeypatch.setattr(
+        "custom_components.screensight.config_flow.NoiseTransport",
+        FakeNoiseTransport,
+    )
+    session = FakeClientSession(FakeWebSocket([_HANDSHAKE_REPLY, *pair_frames()]))
     monkeypatch.setattr(
         "homeassistant.helpers.aiohttp_client.async_get_clientsession",
         lambda *args, **kwargs: session,
@@ -53,6 +64,10 @@ def _advertising(hass, monkeypatch):
         hass.config_entries.flow.async_init(
             DOMAIN, context={"source": SOURCE_ZEROCONF}, data=make_discovery()
         )
+    )
+    hass.loop.run_until_complete(hass.async_block_till_done())
+    flow = hass.loop.run_until_complete(
+        hass.config_entries.flow.async_configure(flow["flow_id"])
     )
     assert flow["type"] is FlowResultType.FORM
     return {"hass": hass, "flow_id": flow["flow_id"]}
@@ -80,12 +95,13 @@ def _confirm_on_panel(pairing):
     )
 
 
-@then("a Screensight config entry exists with a bearer token")
+@then("a Screensight config entry exists with mutual static keys")
 def _entry_created(pairing):
-    """The completed flow must have created a token-bearing entry."""
+    """The completed flow must have created a key-bearing entry."""
     result = pairing["result"]
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_TOKEN] == TOKEN
+    assert result["data"][CONF_DEVICE_STATIC_KEY] == DEVICE_STATIC_KEY
+    assert result["data"][CONF_HA_PRIVATE_KEY]
     assert result["data"][CONF_DEVICE_ID] == DEVICE_ID
     entries = pairing["hass"].config_entries.async_entries(DOMAIN)
     assert len(entries) == 1
@@ -103,10 +119,16 @@ def _connected_device(hass):
         },
     )
     connection = ScreensightConnection(
-        hass, entry, host="192.168.1.50", port=8765, token=TOKEN
+        hass,
+        entry,
+        host="192.168.1.50",
+        port=8765,
+        ha_private=bytes.fromhex(HA_PRIVATE_KEY),
+        device_static=bytes.fromhex(DEVICE_STATIC_KEY),
     )
     ws = FakeWebSocket()
     connection._ws = ws
+    connection._transport = FakeNoiseTransport()
     connection._set_connected(True)
     return {
         "hass": hass,
@@ -125,5 +147,7 @@ def _set_value(display, value):
 @then(parsers.parse('the device receives a "{key}" value of "{value}"'))
 def _frame_received(display, key, value):
     """The exact ``set_value`` frame must have reached the device."""
-    assert {"type": "set_value", "key": key, "value": value} in display["ws"].sent
+    assert {"type": "set_value", "key": key, "value": value} in [
+        dec(blob) for blob in display["ws"].sent
+    ]
     assert display["connection"].value(key) == value

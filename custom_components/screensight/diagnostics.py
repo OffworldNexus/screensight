@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.diagnostics import async_redact_data
 
-from .const import CONF_TOKEN, DOMAIN
+from .const import CONF_HA_PRIVATE_KEY, DOMAIN
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
-TO_REDACT = {CONF_TOKEN}
+TO_REDACT = {CONF_HA_PRIVATE_KEY}
 
 
 async def async_get_config_entry_diagnostics(
