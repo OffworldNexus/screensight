@@ -24,4 +24,6 @@ Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=graphical.target
+# The Pi boots headless to multi-user.target (no desktop, no display manager);
+# it must start there, not under graphical.target which is never reached.
+WantedBy=multi-user.target
