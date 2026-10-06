@@ -1,4 +1,17 @@
-# Screensight
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/brand/header-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset=".github/brand/header-light.svg">
+  <img src=".github/brand/header-light.svg" alt="Screensight — Small bird. Wide view." width="960">
+</picture>
+
+<p align="center">
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#repository-layout">Layout</a> ·
+  <a href="#building-the-device">Build</a> ·
+  <a href="#home-assistant-integration">Home Assistant</a> ·
+  <a href="#tests-and-ci">Tests &amp; CI</a> ·
+  <a href="docs/brand/">Brand</a>
+</p>
 
 A Home Assistant companion display for the Raspberry Pi. A small Rust daemon
 drives the Pi's 800×480 touch panel, advertises itself over mDNS, pairs with
@@ -15,6 +28,23 @@ This repository contains two components:
 Design source of truth: the **Screensight · Brand & Interface** Figma design
 system, mirrored locally under [`docs/brand/`](docs/brand/) (palette, type ramp,
 all 800×480 device screens, bundled fonts).
+
+<p align="center">
+  <img src="docs/brand/palette.svg" alt="Screensight palette: plumage #0BB2B3, deep plumage #0A7577, gorget #F2A900, crown #C9541F, sand #A3968A, ink #141110" width="720">
+</p>
+
+| Token | Hex | Role |
+| --- | --- | --- |
+| plumage | `#0BB2B3` | primary teal accent — links, active state, the bird's plumage |
+| plumage·d | `#0A7577` | pressed / secondary teal |
+| gorget | `#F2A900` | attention gold — highlights and focus |
+| crown | `#C9541F` | warm accent — alerts, the bird's crown |
+| sand | `#A3968A` | muted secondary text |
+| ink | `#141110` | dark canvas and surfaces |
+
+Light surfaces use paper `#FAF7F2`. The mark is the **European bee-eater**
+([`docs/brand/mascot.svg`](docs/brand/mascot.svg)); the head cut is
+[`mascot-head.svg`](docs/brand/mascot-head.svg).
 
 ---
 
