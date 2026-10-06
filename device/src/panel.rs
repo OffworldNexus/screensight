@@ -105,8 +105,8 @@ fn hide_cursor() -> bool {
     *HIDE.get_or_init(|| std::env::var_os("SCREENSIGHT_HIDE_CURSOR").is_some())
 }
 
-/// Cached frame for a given view (screen + pressed key).
-type FrameCache = Option<(Screen, Option<HitAction>, Arc<RenderImage>)>;
+/// Cached frame for a given view (screen + pressed key + animation bucket).
+type FrameCache = Option<(Screen, Option<HitAction>, u32, Arc<RenderImage>)>;
 
 /// Stack two same-size frames into a single image: `top` on top, `bottom`
 /// below. The CRT transition samples both halves from this one atlas tile, which
@@ -140,8 +140,10 @@ struct Panel {
     transition_image: Option<Arc<RenderImage>>,
     /// Wall-clock start of the running transition, if any.
     transition_start: Option<Instant>,
-    /// Last screen, used to detect view changes to animate.
-    last_view: Option<Screen>,
+    /// Wall-clock start of the current view, used to drive loader animation.
+    screen_started: Instant,
+    /// Coarse view identity of the last frame, used to detect view changes.
+    last_view_key: Option<u8>,
 }
 
 impl Panel {
@@ -193,15 +195,16 @@ impl Panel {
         })
         .detach();
 
-        // Frame pump: repaint at ~60 fps *only* while a screen transition is
-        // running. Spawned once here rather than from `render`, where the
-        // spawned task would not reliably drive repaints.
+        // Frame pump: repaint at ~60 fps while a screen transition is running,
+        // and continuously while an animated loader is on screen. Spawned once
+        // here rather than from `render`, where the spawned task would not
+        // reliably drive repaints.
         let pump_executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| loop {
             pump_executor.timer(Duration::from_millis(16)).await;
             if this
                 .update(cx, |panel, cx| {
-                    if panel.transition_start.is_some() {
+                    if panel.transition_start.is_some() || panel.screen.is_animated() {
                         cx.notify();
                     }
                 })
@@ -225,19 +228,24 @@ impl Panel {
             prev_image: None,
             transition_image: None,
             transition_start: None,
-            last_view: None,
+            screen_started: Instant::now(),
+            last_view_key: None,
         }
     }
 
-    /// Build (or reuse) the `RenderImage` for the current screen.
-    fn render_image(&mut self) -> Option<Arc<RenderImage>> {
+    /// Build (or reuse) the `RenderImage` for the current screen at `elapsed`
+    /// seconds into its view.
+    fn render_image(&mut self, elapsed: f32) -> Option<Arc<RenderImage>> {
         let pressed = self.pressed.map(|(action, _)| action);
-        if let Some((screen, cached_pressed, image)) = &self.cache {
-            if screen == &self.screen && *cached_pressed == pressed {
+        // Bucket the animation time to whole milliseconds so a settled frame is
+        // reused until the loader actually needs to advance.
+        let bucket = (elapsed * 1000.0) as u32;
+        if let Some((screen, cached_pressed, cached_bucket, image)) = &self.cache {
+            if screen == &self.screen && *cached_pressed == pressed && *cached_bucket == bucket {
                 return Some(image.clone());
             }
         }
-        let (canvas, hits) = screens::frame_for_with(&self.screen, pressed);
+        let (canvas, hits) = screens::frame_for_with(&self.screen, pressed, elapsed);
         self.hits = hits;
         // GPUI's atlas wants BGRA bytes; its own loader stores them in an
         // `Rgba`-typed buffer after swapping R/B. We feed the BGRA bytes in
@@ -249,7 +257,7 @@ impl Panel {
         )?;
         let frame = image::Frame::new(buffer);
         let image = Arc::new(RenderImage::new(vec![frame]));
-        self.cache = Some((self.screen.clone(), pressed, image.clone()));
+        self.cache = Some((self.screen.clone(), pressed, bucket, image.clone()));
         Some(image)
     }
 
@@ -295,20 +303,27 @@ impl Panel {
 
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Detect a screen change and animate it. Pressed highlights also rebuild
-        // the frame, but must not trigger a transition.
-        let view_changed = self.last_view.as_ref() != Some(&self.screen);
-        let old_cache = self.cache.as_ref().map(|c| c.2.clone());
+        // Detect a coarse view change and animate it. Loader animation ticks
+        // share a view key, so they repaint without triggering a transition.
+        let view_key = self.screen.view_key();
+        let view_changed = self.last_view_key != Some(view_key);
+        let old_cache = self.cache.as_ref().map(|c| c.3.clone());
 
         if view_changed {
             // Keep the outgoing frame so we can stack it with the incoming one.
             self.prev_image = old_cache.clone();
             self.transition_image = None;
             self.transition_start = Some(Instant::now());
-            self.last_view = Some(self.screen.clone());
+            self.screen_started = Instant::now();
+            self.last_view_key = Some(view_key);
         }
 
-        let image = self.render_image();
+        let elapsed = if self.screen.is_animated() {
+            self.screen_started.elapsed().as_secs_f32()
+        } else {
+            0.0
+        };
+        let image = self.render_image(elapsed);
 
         // Build the stacked CRT frame once, from the outgoing and incoming
         // frames. Its pixels live in the stacked image, so release the original

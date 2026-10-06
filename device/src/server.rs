@@ -1,28 +1,34 @@
 //! Home Assistant WebSocket server.
 //!
 //! One endpoint, `/ws`, carries both the pairing handshake and the steady-state
-//! link. A connection is *authenticated* when its `Authorization: Bearer
-//! <token>` header matches a paired instance; unauthenticated connections may
-//! only send `pair` (and are still gated by the pairing window and per-address
-//! rate limiting). Pairing completes only once the user confirms on the panel,
-//! after which the token is returned over the same socket.
+//! link. The Noise pattern is negotiated up front through the
+//! `Sec-WebSocket-Protocol` subprotocol (`screensight.noise.xx` for first
+//! contact, `screensight.noise.ik` for a remembered key); an upgrade with
+//! neither token is rejected before the socket is handed over.
+//!
+//! After the upgrade every frame is a WebSocket **binary** frame holding exactly
+//! one Noise message. The handshake runs first, under a hard timeout so a
+//! stalled peer cannot hold device resources; only then does the encrypted
+//! application loop begin. A connection is authenticated when the initiator's
+//! static key matches a paired instance.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::http::HeaderMap;
-use axum::response::IntoResponse;
+use axum::http::{HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use futures_util::stream::SplitSink;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 
-use crate::pairing::{SubmitOutcome, WINDOW};
+use crate::noise::{self, Handshake, Mode, NoiseSession, HANDSHAKE_TIMEOUT};
+use crate::pairing::WINDOW;
 use crate::protocol::{ClientMessage, PairErrorReason, PairRejection, ServerMessage};
 use crate::runtime::Runtime;
 
@@ -75,48 +81,95 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(runtime): State<Arc<Runtime>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let token = bearer_token(&headers);
-    ws.on_upgrade(move |socket| handle_socket(socket, runtime, peer, token))
+) -> Response {
+    // The Noise pattern is negotiated entirely by subprotocol: Home Assistant
+    // asks for exactly one, and we reject anything we do not speak before the
+    // upgrade. axum's `.protocols()` only advertises support, so the request is
+    // inspected and matched here.
+    let mode = ws
+        .requested_protocols()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(Mode::from_subprotocol);
+    let Some(mode) = mode else {
+        log::debug!("rejecting websocket without a known Noise subprotocol");
+        return (
+            StatusCode::BAD_REQUEST,
+            "unsupported Sec-WebSocket-Protocol",
+        )
+            .into_response();
+    };
+
+    let mut ws = ws;
+    ws.set_selected_protocol(HeaderValue::from_static(mode.subprotocol()));
+    ws.on_upgrade(move |socket| handle_socket(socket, runtime, peer, mode))
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
-        .map(|value| value.trim().to_owned())
+/// A handshake that completed, with the transport and the peer's static key.
+struct Established {
+    noise: NoiseSession,
+    /// The peer's static public key, hex-encoded.
+    peer_key_hex: String,
 }
 
-async fn handle_socket(
-    socket: WebSocket,
-    runtime: Arc<Runtime>,
-    peer: SocketAddr,
-    token: Option<String>,
-) {
+async fn handle_socket(socket: WebSocket, runtime: Arc<Runtime>, peer: SocketAddr, mode: Mode) {
     let (mut sender, mut receiver) = socket.split();
-    let instance = token.as_deref().and_then(|t| runtime.authenticate(t));
 
+    let Some(Established {
+        mut noise,
+        peer_key_hex,
+    }) = handshake(&mut sender, &mut receiver, &runtime, peer, mode).await
+    else {
+        return;
+    };
+
+    // Home Assistant authenticates the device with the handshake. The device
+    // authenticates Home Assistant by its static key. An IK reconnect from an
+    // unknown key is told why (inside the encrypted channel) and then dropped
+    // before any application frame is processed, so Home Assistant can raise a
+    // repair flow instead of retrying forever.
+    let mut instance = runtime.authenticate_by_static_key(&peer_key_hex);
+    if mode == Mode::Ik && instance.is_none() {
+        log::warn!("rejecting IK reconnect from unknown static key");
+        let _ = send_message(
+            &mut sender,
+            &mut noise,
+            &ServerMessage::Error {
+                message: "unknown static key: pair this device again".to_owned(),
+            },
+        )
+        .await;
+        return;
+    }
     if let Some(instance) = &instance {
         runtime.set_connected(&instance.ha_id, true);
         log::info!("{} connected ({})", instance.ha_name, instance.ha_id);
-        let _ = send(&mut sender, &current_state(&runtime, &instance.ha_id)).await;
+        let state = current_state(&runtime, &instance.ha_id);
+        let _ = send_message(&mut sender, &mut noise, &state).await;
     }
 
     while let Some(frame) = receiver.next().await {
         let Ok(frame) = frame else { break };
-        let text = match frame {
-            Message::Text(text) => text,
+        let ciphertext = match frame {
+            Message::Binary(bytes) => bytes,
             Message::Close(_) => break,
-            _ => continue,
+            Message::Ping(_) | Message::Pong(_) => continue,
+            // Application frames are always binary; a text frame is a protocol
+            // violation and ends the connection.
+            Message::Text(_) => break,
         };
-        let message = match serde_json::from_str::<ClientMessage>(&text) {
+        let plaintext = match noise.decrypt(&ciphertext) {
+            Ok(plaintext) => plaintext,
+            Err(err) => {
+                log::debug!("dropping connection after a bad transport frame: {err:#}");
+                break;
+            }
+        };
+        let message = match serde_json::from_slice::<ClientMessage>(&plaintext) {
             Ok(message) => message,
             Err(err) => {
-                let _ = send(
+                let _ = send_message(
                     &mut sender,
+                    &mut noise,
                     &ServerMessage::Error {
                         message: format!("malformed frame: {err}"),
                     },
@@ -128,49 +181,70 @@ async fn handle_socket(
 
         match message {
             ClientMessage::Ping => {
-                let _ = send(&mut sender, &ServerMessage::Pong).await;
+                let _ = send_message(&mut sender, &mut noise, &ServerMessage::Pong).await;
             }
-            ClientMessage::Pair {
-                device_id,
-                code,
-                ha_id,
-                ha_name,
-            } => {
-                if instance.is_some() {
-                    let _ = send(
+            ClientMessage::Pair { ha_id, ha_name } => {
+                if mode != Mode::Xx || instance.is_some() {
+                    let _ = send_message(
                         &mut sender,
+                        &mut noise,
                         &ServerMessage::Error {
-                            message: "already paired on this connection".to_owned(),
+                            message: "pairing is not available on this connection".to_owned(),
                         },
                     )
                     .await;
                     continue;
                 }
-                handle_pair(
+                if !runtime.pairing_open(Instant::now()) {
+                    let _ = send_message(
+                        &mut sender,
+                        &mut noise,
+                        &ServerMessage::PairError {
+                            reason: PairErrorReason::WindowClosed,
+                            retry_after_secs: None,
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+                let identity = runtime.identity();
+                runtime.accept_pair_request(&ha_id, &ha_name);
+                let _ = send_message(
                     &mut sender,
-                    &runtime,
-                    peer,
-                    &device_id,
-                    &code,
-                    &ha_id,
-                    &ha_name,
+                    &mut noise,
+                    &ServerMessage::PairPending {
+                        device_id: identity.id.clone(),
+                        name: identity.name.clone(),
+                        ha_name: ha_name.clone(),
+                    },
                 )
                 .await;
+
+                if await_confirmation(&mut sender, &mut noise, &runtime, &ha_id).await {
+                    instance = runtime.authenticate_by_static_key(&peer_key_hex);
+                    if let Some(instance) = &instance {
+                        runtime.set_connected(&instance.ha_id, true);
+                        let state = current_state(&runtime, &instance.ha_id);
+                        let _ = send_message(&mut sender, &mut noise, &state).await;
+                    }
+                }
             }
             ClientMessage::SetValue { key, value } => {
                 if let Some(instance) = &instance {
                     runtime.set_value(&instance.ha_id, &key, &value);
-                    let _ = send(&mut sender, &current_state(&runtime, &instance.ha_id)).await;
+                    let state = current_state(&runtime, &instance.ha_id);
+                    let _ = send_message(&mut sender, &mut noise, &state).await;
                 } else {
-                    let _ = send_unauthenticated(&mut sender).await;
+                    let _ = send_unauthenticated(&mut sender, &mut noise).await;
                 }
             }
             ClientMessage::SetState { values } => {
                 if let Some(instance) = &instance {
                     runtime.set_values(&instance.ha_id, values);
-                    let _ = send(&mut sender, &current_state(&runtime, &instance.ha_id)).await;
+                    let state = current_state(&runtime, &instance.ha_id);
+                    let _ = send_message(&mut sender, &mut noise, &state).await;
                 } else {
-                    let _ = send_unauthenticated(&mut sender).await;
+                    let _ = send_unauthenticated(&mut sender, &mut noise).await;
                 }
             }
         }
@@ -182,122 +256,167 @@ async fn handle_socket(
     }
 }
 
-/// Run one pairing attempt, waiting for the on-panel confirmation.
-async fn handle_pair(
+/// Run the Noise handshake as the responder. Returns `None` (and drops the
+/// connection) on any failure, timeout, or refused attempt.
+async fn handshake(
     sender: &mut SplitSink<WebSocket, Message>,
+    receiver: &mut SplitStream<WebSocket>,
     runtime: &Arc<Runtime>,
     peer: SocketAddr,
-    device_id: &str,
-    code: &str,
-    ha_id: &str,
-    ha_name: &str,
-) {
-    let identity = runtime.identity();
-    if device_id != identity.id {
-        let _ = send(
-            sender,
-            &ServerMessage::PairError {
-                reason: PairErrorReason::WrongDevice,
-                retry_after_secs: None,
-                attempts_left: None,
-            },
-        )
-        .await;
-        return;
+    mode: Mode,
+) -> Option<Established> {
+    let now = Instant::now();
+    if mode == Mode::Xx {
+        if !runtime.pairing_open(now) {
+            log::debug!("refusing XX handshake: pairing window closed");
+            return None;
+        }
+        if let Some(retry) = runtime.handshake_retry_after(peer.ip(), now) {
+            log::warn!(
+                "refusing XX handshake from {}: locked out for {retry}s",
+                peer.ip()
+            );
+            return None;
+        }
+        runtime.begin_handshake();
     }
 
-    let outcome = runtime.submit_code(peer.ip(), code, ha_id, ha_name, Instant::now());
-    match outcome {
-        SubmitOutcome::Pending => {
-            let _ = send(
-                sender,
-                &ServerMessage::PairPending {
-                    device_id: identity.id.clone(),
-                    name: identity.name.clone(),
-                    ha_name: ha_name.to_owned(),
-                },
-            )
-            .await;
-            await_confirmation(sender, runtime, ha_id).await;
+    let keys = runtime.keys();
+    let mut state = match Handshake::responder(mode, &keys.private) {
+        Ok(state) => state,
+        Err(err) => {
+            log::error!("could not start the Noise responder: {err:#}");
+            return fail(runtime, peer, mode);
         }
-        SubmitOutcome::InvalidCode { attempts_left } => {
-            let _ = send(
-                sender,
-                &ServerMessage::PairError {
-                    reason: PairErrorReason::InvalidCode,
-                    retry_after_secs: None,
-                    attempts_left: Some(attempts_left),
-                },
-            )
-            .await;
+    };
+
+    // One binary WS frame per Noise message, each step bounded so a stalled
+    // peer cannot hold the connection open indefinitely.
+    let step = async {
+        let first = recv_binary(receiver).await?;
+        state.read(&first)?;
+        let reply = state.write(&[])?;
+        send_binary(sender, &reply).await?;
+        if mode == Mode::Xx {
+            let third = recv_binary(receiver).await?;
+            state.read(&third)?;
         }
-        SubmitOutcome::RateLimited { retry_after_secs } => {
-            let _ = send(
-                sender,
-                &ServerMessage::PairError {
-                    reason: PairErrorReason::RateLimited,
-                    retry_after_secs: Some(retry_after_secs),
-                    attempts_left: None,
-                },
-            )
-            .await;
+        if !state.is_finished() {
+            bail!("handshake ended before it completed");
         }
-        SubmitOutcome::WindowClosed => {
-            let _ = send(
-                sender,
-                &ServerMessage::PairError {
-                    reason: PairErrorReason::WindowClosed,
-                    retry_after_secs: None,
-                    attempts_left: None,
-                },
-            )
-            .await;
+        anyhow::Ok(())
+    }
+    .await;
+    if let Err(err) = step {
+        log::debug!(
+            "Noise {mode:?} handshake with {} failed: {err:#}",
+            peer.ip()
+        );
+        return fail(runtime, peer, mode);
+    }
+
+    let peer_static = match state.peer_static() {
+        Some(key) => key,
+        None => {
+            log::debug!("handshake revealed no peer static key");
+            return fail(runtime, peer, mode);
+        }
+    };
+    let session = match state.into_session() {
+        Ok(session) => session,
+        Err(err) => {
+            log::debug!("cannot enter Noise transport mode: {err:#}");
+            return fail(runtime, peer, mode);
+        }
+    };
+
+    let peer_key_hex = noise::to_hex(&peer_static);
+    if mode == Mode::Xx {
+        runtime.set_pairing_sas(&peer_key_hex, &session.sas);
+    }
+    Some(Established {
+        noise: session,
+        peer_key_hex,
+    })
+}
+
+/// Record a failed pairing attempt (XX only) and return `None`.
+fn fail(runtime: &Runtime, peer: SocketAddr, mode: Mode) -> Option<Established> {
+    if mode == Mode::Xx {
+        runtime.record_handshake_failure(peer.ip(), Instant::now());
+        runtime.fail_pairing();
+    }
+    None
+}
+
+/// Read one handshake frame, enforcing [`HANDSHAKE_TIMEOUT`].
+async fn recv_binary(receiver: &mut SplitStream<WebSocket>) -> Result<Vec<u8>> {
+    loop {
+        let next = tokio::time::timeout(HANDSHAKE_TIMEOUT, receiver.next())
+            .await
+            .map_err(|_| anyhow::anyhow!("handshake timed out"))?;
+        match next {
+            None => bail!("connection closed during the handshake"),
+            Some(Err(err)) => return Err(err).context("reading a handshake frame"),
+            Some(Ok(Message::Binary(bytes))) => return Ok(bytes.to_vec()),
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            Some(Ok(Message::Close(_))) => bail!("connection closed during the handshake"),
+            Some(Ok(Message::Text(_))) => bail!("expected a binary handshake frame"),
         }
     }
+}
+
+async fn send_binary(sender: &mut SplitSink<WebSocket, Message>, bytes: &[u8]) -> Result<()> {
+    sender
+        .send(Message::Binary(bytes.to_vec().into()))
+        .await
+        .context("sending a websocket frame")
 }
 
 /// Poll until the user confirms (success), declines, or the window lapses.
 async fn await_confirmation(
     sender: &mut SplitSink<WebSocket, Message>,
+    noise: &mut NoiseSession,
     runtime: &Arc<Runtime>,
     ha_id: &str,
-) {
+) -> bool {
     let deadline = Instant::now() + WINDOW + CONFIRM_GRACE;
     loop {
         tokio::time::sleep(CONFIRM_POLL).await;
 
-        // Confirmed: the instance now exists with a token.
+        // Confirmed: the instance now exists, keyed by the handshake static key.
         if let Some(instance) = runtime.paired_instance(ha_id) {
             let identity = runtime.identity();
-            let _ = send(
+            let _ = send_message(
                 sender,
+                noise,
                 &ServerMessage::PairSuccess {
-                    token: instance.token,
                     device_id: identity.id,
                     name: identity.name,
-                    ha_id: ha_id.to_owned(),
+                    ha_id: instance.ha_id,
                 },
             )
             .await;
-            return;
+            return true;
         }
 
-        // Pending cleared without pairing: declined or timed out.
+        // Pending cleared without pairing: declined or the window lapsed.
         if runtime.pending_pair().is_none() {
             let reason = runtime.take_rejection().unwrap_or(PairRejection::TimedOut);
-            let _ = send(sender, &ServerMessage::PairRejected { reason }).await;
-            return;
+            let _ = send_message(sender, noise, &ServerMessage::PairRejected { reason }).await;
+            return false;
         }
 
         if Instant::now() > deadline {
-            let _ = send(
+            let _ = send_message(
                 sender,
+                noise,
                 &ServerMessage::PairRejected {
                     reason: PairRejection::TimedOut,
                 },
             )
             .await;
-            return;
+            return false;
         }
     }
 }
@@ -310,19 +429,28 @@ fn current_state(runtime: &Runtime, ha_id: &str) -> ServerMessage {
     }
 }
 
-async fn send(sender: &mut SplitSink<WebSocket, Message>, message: &ServerMessage) -> Result<()> {
-    let json = serde_json::to_string(message).context("encoding server message")?;
+async fn send_message(
+    sender: &mut SplitSink<WebSocket, Message>,
+    noise: &mut NoiseSession,
+    message: &ServerMessage,
+) -> Result<()> {
+    let json = serde_json::to_vec(message).context("encoding server message")?;
+    let ciphertext = noise.encrypt(&json)?;
     sender
-        .send(Message::Text(json.into()))
+        .send(Message::Binary(ciphertext.into()))
         .await
         .context("sending websocket frame")
 }
 
-async fn send_unauthenticated(sender: &mut SplitSink<WebSocket, Message>) -> Result<()> {
-    send(
+async fn send_unauthenticated(
+    sender: &mut SplitSink<WebSocket, Message>,
+    noise: &mut NoiseSession,
+) -> Result<()> {
+    send_message(
         sender,
+        noise,
         &ServerMessage::Error {
-            message: "unauthenticated: pair first or supply a token".to_owned(),
+            message: "unauthenticated: this static key is not paired".to_owned(),
         },
     )
     .await

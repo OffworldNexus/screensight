@@ -185,8 +185,11 @@ fn describe(screen: &Screen) -> String {
     match screen {
         Screen::Splash { name } => format!("splash {name}"),
         Screen::Idle => "idle".to_owned(),
-        Screen::Pairing { code, name } => format!("pairing {name} (code {code})"),
+        Screen::PairingWaiting { name } => format!("pairing waiting ({name})"),
+        Screen::PairingHandshake { name } => format!("pairing handshake ({name})"),
+        Screen::PairingCode { sas } => format!("pairing code {sas}"),
         Screen::Confirm { ha_name } => format!("confirm {ha_name}"),
+        Screen::PairingError => "pairing error".to_owned(),
         Screen::Dashboard { values } => match values.get("text") {
             Some(text) => format!("dashboard {:?}", truncate(text, 40)),
             None => "dashboard (empty)".to_owned(),

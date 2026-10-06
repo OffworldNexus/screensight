@@ -1,10 +1,11 @@
 //! Screen compositor: turns a [`Screen`] into a rasterised [`FrameCanvas`] and
 //! the touch hit regions for its keys.
 //!
-//! The device has exactly four faces — idle, pairing, confirm and the paired
-//! dashboard — and only three actions between them (start, confirm, decline).
-//! There is deliberately no step rail, help deck or other chrome: what the
-//! device needs to say is said once, plainly.
+//! The device has a small set of faces — idle, the pairing loader, the SAS, the
+//! confirmation, a single generic pairing error and the paired dashboard — and
+//! only three actions between them (start, confirm, decline). There is
+//! deliberately no step rail, help deck or other chrome: what the device needs
+//! to say is said once, plainly.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +24,8 @@ pub const SAND_300: Color = Color::hex(0xc0b4a4);
 pub const SAND_50: Color = Color::hex(0xfaf7f2);
 /// plumage-500.
 pub const PLUMAGE_500: Color = Color::hex(0x0bb2b3);
+/// plumage-300, the bright raster scan carrier.
+pub const PLUMAGE_300: Color = Color::hex(0x4fdbda);
 /// gorget-500.
 pub const GORGET_500: Color = Color::hex(0xf2a900);
 
@@ -159,22 +162,39 @@ fn format_code(code: &str) -> String {
 /// Compose the frame for `screen`, without press feedback.
 #[must_use]
 pub fn frame_for(screen: &Screen) -> (FrameCanvas, Vec<(HitRegion, HitAction)>) {
-    frame_for_with(screen, None)
+    frame_for_with(screen, None, 0.0)
 }
 
 /// Compose the frame for `screen`, optionally highlighting a pressed key.
+///
+/// `elapsed` is the seconds since the current screen appeared; only the loader
+/// screens use it (for the Signal-search sweep and pulse).
 #[must_use]
 pub fn frame_for_with(
     screen: &Screen,
     pressed: Option<HitAction>,
+    elapsed: f32,
 ) -> (FrameCanvas, Vec<(HitRegion, HitAction)>) {
     let mut canvas = FrameCanvas::new();
     let mut hits: Vec<(HitRegion, HitAction)> = Vec::new();
     match screen {
         Screen::Splash { name } => splash(&mut canvas, name),
         Screen::Idle => idle(&mut canvas, pressed, &mut hits),
-        Screen::Pairing { code, name } => pairing(&mut canvas, name, code),
+        Screen::PairingWaiting { name } => {
+            loader(
+                &mut canvas,
+                name,
+                "Waiting for Home Assistant\u{2026}",
+                elapsed,
+                2.4,
+            );
+        }
+        Screen::PairingHandshake { name } => {
+            loader(&mut canvas, name, "Exchanging keys\u{2026}", elapsed, 1.2);
+        }
+        Screen::PairingCode { sas } => pairing_code(&mut canvas, sas),
         Screen::Confirm { ha_name } => confirm(&mut canvas, ha_name, pressed, &mut hits),
+        Screen::PairingError => pairing_error(&mut canvas, pressed, &mut hits),
         Screen::Dashboard { values } => dashboard(&mut canvas, values),
     }
     (canvas, hits)
@@ -222,18 +242,176 @@ fn idle(
     hits.push((region, HitAction::StartPairing));
 }
 
-/// The pairing window: the device's name and the code Home Assistant must be
-/// told. No actions.
-fn pairing(canvas: &mut FrameCanvas, name: &str, code: &str) {
+/// The pairing loader ("Signal search"): device name, an instruction, a small
+/// raster-scanned globe and a status line. Used for both the waiting and the
+/// handshake variants, which differ only in `status_text` and sweep period.
+fn loader(canvas: &mut FrameCanvas, name: &str, status_text: &str, elapsed: f32, period: f32) {
     canvas.fill(BG);
     title(canvas, name);
+    let mut instruction = ts(JETBRAINS_MONO, 18.0, SAND_300, Weight::NORMAL);
+    instruction.line_height = 26.0;
+    instruction.max_width = 460.0;
+    canvas.text(
+        MARGIN,
+        140.0,
+        "Open Home Assistant and select",
+        &instruction,
+    );
+    canvas.text(
+        MARGIN,
+        174.0,
+        "this display to begin pairing.",
+        &instruction,
+    );
+
+    globe(canvas, elapsed, period);
+
+    let mut hint = ts(JETBRAINS_MONO, 15.0, PLUMAGE_500, Weight::NORMAL);
+    hint.line_height = 22.0;
+    hint.max_width = CONTENT_W;
+    canvas.text(MARGIN, 404.0, status_text, &hint);
+}
+
+/// Figma's 168px raster orb, at (552, 184). The deliberately sparse cell rows
+/// trace meridians and parallels rather than filling a disc; boundary cells are
+/// 4×3px, interior cells 3×3px, all on the reference's 7px grid.
+fn globe(canvas: &mut FrameCanvas, elapsed: f32, period: f32) {
+    const X: i32 = 552;
+    const Y: i32 = 184;
+    const ROWS: &[&[i32]] = &[
+        &[84],
+        &[56, 70, 84, 98, 112],
+        &[42, 63, 84, 105, 126],
+        &[35, 56, 84, 112, 133],
+        &[
+            28, 35, 42, 49, 56, 63, 70, 77, 84, 91, 98, 105, 112, 119, 126, 133, 140,
+        ],
+        &[28, 49, 84, 119, 140],
+        &[21, 49, 84, 119, 147],
+        &[21, 49, 84, 119, 147],
+        &[
+            21, 28, 35, 42, 49, 56, 63, 70, 77, 84, 91, 98, 105, 112, 119, 126, 133, 140, 147,
+        ],
+        &[21, 42, 49, 84, 119, 126, 147],
+        &[14, 42, 49, 84, 119, 126, 154],
+        &[21, 42, 49, 84, 119, 126, 147],
+        &[
+            21, 28, 35, 42, 49, 56, 63, 70, 77, 84, 91, 98, 105, 112, 119, 126, 133, 140, 147,
+        ],
+        &[21, 49, 84, 119, 147],
+        &[21, 49, 84, 119, 147],
+        &[28, 49, 84, 119, 140],
+        &[
+            28, 35, 42, 49, 56, 63, 70, 77, 84, 91, 98, 105, 112, 119, 126, 133, 140,
+        ],
+        &[35, 56, 84, 112, 133],
+        &[42, 63, 84, 105, 126],
+        &[56, 70, 84, 98, 112],
+        &[84],
+    ];
+    for (row, columns) in ROWS.iter().enumerate() {
+        for (index, x) in columns.iter().enumerate() {
+            let width = if index == 0 || index == columns.len() - 1 {
+                4
+            } else {
+                3
+            };
+            canvas.rect(X + x, Y + 14 + row as i32 * 7, width, 3, PLUMAGE_500);
+        }
+    }
+
+    // The scan travels 126px by 92% of the cycle, fades before the reset,
+    // then holds invisibly. Keep the twelve separate 5×3px carrier cells.
+    let phase = (elapsed / period).rem_euclid(1.0);
+    let opacity = if phase < 0.05 {
+        phase / 0.05
+    } else if phase <= 0.85 {
+        1.0
+    } else {
+        ((0.92 - phase) / 0.07).max(0.0)
+    };
+    let sweep_y = Y + 19 + (126.0 * (phase / 0.92).min(1.0)).round() as i32;
+    if opacity > 0.0 {
+        let scan = Color::rgba(
+            PLUMAGE_300.0,
+            PLUMAGE_300.1,
+            PLUMAGE_300.2,
+            (opacity * 255.0).round() as u8,
+        );
+        for column in 0..12 {
+            canvas.rect(X + 42 + column * 7, sweep_y, 5, 3, scan);
+        }
+    }
+
+    // The gold square indicates activity, not trust. Both half-cycles use
+    // Figma's CSS ease-in-out curve, from 50% to 100% opacity and back.
+    let progress = if phase <= 0.5 {
+        phase * 2.0
+    } else {
+        (1.0 - phase) * 2.0
+    };
+    let pulse = 0.5 + 0.5 * ease_in_out(progress);
+    let core = Color::rgba(
+        GORGET_500.0,
+        GORGET_500.1,
+        GORGET_500.2,
+        (pulse * 255.0).round() as u8,
+    );
+    canvas.rect(X + 81, Y + 80, 8, 8, core);
+}
+
+/// Evaluate CSS cubic-bezier(0.42, 0, 0.58, 1), solving its time axis first so
+/// the CPU animation uses the same easing as the Figma prototype.
+fn ease_in_out(progress: f32) -> f32 {
+    let (mut low, mut high) = (0.0_f32, 1.0_f32);
+    for _ in 0..16 {
+        let t = (low + high) * 0.5;
+        let x = 3.0 * (1.0 - t).powi(2) * t * 0.42 + 3.0 * (1.0 - t) * t * t * 0.58 + t * t * t;
+        if x < progress {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    let t = (low + high) * 0.5;
+    3.0 * (1.0 - t) * t * t + t * t * t
+}
+
+/// The SAS: the eight digits the user types into Home Assistant, shown only
+/// once the handshake has produced them. No actions.
+fn pairing_code(canvas: &mut FrameCanvas, sas: &str) {
+    canvas.fill(BG);
+    title(canvas, "Pair this display");
     body(canvas, 140.0, "Enter this code in Home Assistant to pair:");
 
     let mut code_style = ts(VT323, 96.0, GORGET_500, Weight::NORMAL);
     code_style.line_height = 100.0;
-    canvas.text(MARGIN, 196.0, &format_code(code), &code_style);
+    canvas.text(MARGIN, 196.0, &format_code(sas), &code_style);
 
-    status(canvas, 404.0, "Waiting for Home Assistant\u{2026}");
+    status(canvas, 404.0, "Waiting for confirmation\u{2026}");
+}
+
+/// The single generic pairing failure screen: one message, one action that
+/// starts the flow over.
+fn pairing_error(
+    canvas: &mut FrameCanvas,
+    pressed: Option<HitAction>,
+    hits: &mut Vec<(HitRegion, HitAction)>,
+) {
+    canvas.fill(BG);
+    title(canvas, "Pairing failed");
+    body(canvas, 150.0, "Something went wrong during pairing.");
+    let region = key(
+        canvas,
+        MARGIN,
+        376.0,
+        300.0,
+        56.0,
+        "Start pairing again",
+        true,
+        pressed == Some(HitAction::StartPairing),
+    );
+    hits.push((region, HitAction::StartPairing));
 }
 
 /// A Home Assistant typed the correct code; ask the user to approve it.
@@ -322,10 +500,16 @@ mod tests {
                 name: "Brave Otter".to_owned(),
             },
             Screen::Idle,
-            Screen::Pairing {
-                code: "123456".to_owned(),
+            Screen::PairingWaiting {
                 name: "Brave Otter".to_owned(),
             },
+            Screen::PairingHandshake {
+                name: "Brave Otter".to_owned(),
+            },
+            Screen::PairingCode {
+                sas: "12345678".to_owned(),
+            },
+            Screen::PairingError,
             Screen::Confirm {
                 ha_name: "My home".to_owned(),
             },
@@ -362,13 +546,17 @@ mod tests {
     }
 
     #[test]
-    fn only_idle_and_confirm_offer_actions() {
+    fn only_idle_confirm_and_error_offer_actions() {
         assert!(frame_for(&Screen::Idle)
             .1
             .iter()
             .any(|(_, a)| *a == HitAction::StartPairing));
-        assert!(frame_for(&Screen::Pairing {
-            code: "123456".into(),
+        assert!(frame_for(&Screen::PairingCode {
+            sas: "12345678".into(),
+        })
+        .1
+        .is_empty());
+        assert!(frame_for(&Screen::PairingWaiting {
             name: "Brave Otter".into()
         })
         .1
@@ -378,6 +566,8 @@ mod tests {
         });
         assert!(confirm.iter().any(|(_, a)| *a == HitAction::Confirm));
         assert!(confirm.iter().any(|(_, a)| *a == HitAction::Decline));
+        let (_, error) = frame_for(&Screen::PairingError);
+        assert!(error.iter().any(|(_, a)| *a == HitAction::StartPairing));
         assert!(frame_for(&Screen::Dashboard {
             values: BTreeMap::new()
         })
@@ -398,15 +588,14 @@ mod tests {
     }
 
     #[test]
-    fn pairing_code_is_drawn_in_gorget_pixels() {
-        let (canvas, _hits) = frame_for(&Screen::Pairing {
-            code: "123456".to_owned(),
-            name: "Brave Otter".to_owned(),
+    fn sas_is_drawn_in_gorget_pixels() {
+        let (canvas, _hits) = frame_for(&Screen::PairingCode {
+            sas: "12345678".to_owned(),
         });
-        // The code is VT323 96px gorget-500 in the upper-left block.
+        // The SAS is VT323 96px gorget-500 in the upper-left block.
         let mut found = false;
         for y in 196..304usize {
-            for x in 48..400usize {
+            for x in 48..704usize {
                 let idx = (y * crate::raster::WIDTH + x) * 4;
                 let b = canvas.frame()[idx];
                 let g = canvas.frame()[idx + 1];
@@ -422,13 +611,105 @@ mod tests {
         }
         assert!(
             found,
-            "expected gorget-coloured code pixels in the pairing block"
+            "expected gorget-coloured SAS pixels in the pairing block"
         );
+    }
+
+    #[test]
+    fn eight_digit_sas_fits_the_content_width() {
+        let mut canvas = FrameCanvas::new();
+        let style = ts(VT323, 96.0, GORGET_500, Weight::NORMAL);
+        let (width, _) = canvas.measure(&format_code("12345678"), &style);
+        assert!(
+            width <= CONTENT_W,
+            "SAS {width}px wider than the {CONTENT_W}px content column"
+        );
+    }
+
+    #[test]
+    fn loader_animates_and_stays_within_the_frame() {
+        // Two points in the sweep cycle produce different pixels, i.e. the
+        // loader is genuinely animated.
+        let screen = Screen::PairingWaiting {
+            name: "Brave Otter".to_owned(),
+        };
+        let (a, _) = frame_for_with(&screen, None, 0.0);
+        let (b, _) = frame_for_with(&screen, None, 1.2);
+        assert_ne!(
+            a.frame(),
+            b.frame(),
+            "loader frames should differ over time"
+        );
+        assert!(Screen::PairingWaiting { name: "x".into() }.is_animated());
+        assert!(Screen::PairingHandshake { name: "x".into() }.is_animated());
+        assert!(!Screen::PairingCode {
+            sas: "12345678".into()
+        }
+        .is_animated());
+    }
+
+    #[test]
+    fn loader_matches_figma_wireframe_geometry() {
+        let mut canvas = FrameCanvas::new();
+        canvas.fill(BG);
+        globe(&mut canvas, 0.0, 2.4);
+        let pixel = |x, y| {
+            let index = (y * crate::raster::WIDTH + x) * 4;
+            &canvas.frame()[index..index + 4]
+        };
+        // Figma's pole, equator boundary, and a sparse interior meridian.
+        assert_eq!(pixel(636, 198), PLUMAGE_500.to_bgra());
+        assert_eq!(pixel(566, 268), PLUMAGE_500.to_bgra());
+        assert_eq!(pixel(601, 240), PLUMAGE_500.to_bgra());
+        assert_eq!(pixel(606, 240), BG.to_bgra());
+        // The 8px carrier must not grow into the former 30px gold disc.
+        assert_ne!(pixel(633, 264), BG.to_bgra());
+        assert_eq!(pixel(632, 264), BG.to_bgra());
+        assert_eq!(pixel(641, 264), BG.to_bgra());
+        // Everything belongs to the 168×168px slot on the right.
+        for y in 0..crate::raster::HEIGHT {
+            for x in 0..crate::raster::WIDTH {
+                if !(552..720).contains(&x) || !(184..352).contains(&y) {
+                    assert_eq!(pixel(x, y), BG.to_bgra());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loader_scan_fades_before_reset_and_pulse_loops() {
+        let render_orb = |elapsed| {
+            let mut canvas = FrameCanvas::new();
+            canvas.fill(BG);
+            globe(&mut canvas, elapsed, 2.4);
+            canvas
+        };
+        let initial = render_orb(0.0);
+        let repeated = render_orb(2.4);
+        assert_eq!(initial.frame(), repeated.frame());
+        let peak = render_orb(1.2);
+        let core = (264 * crate::raster::WIDTH + 633) * 4;
+        assert_eq!(&peak.frame()[core..core + 4], GORGET_500.to_bgra());
+        assert_ne!(
+            &initial.frame()[core..core + 4],
+            &peak.frame()[core..core + 4]
+        );
+        let has_scan = |canvas: &FrameCanvas| {
+            canvas
+                .frame()
+                .as_chunks::<4>()
+                .0
+                .contains(&PLUMAGE_300.to_bgra())
+        };
+        assert!(has_scan(&peak));
+        assert!(!has_scan(&render_orb(2.3)));
+        assert!(!has_scan(&initial));
     }
 
     #[test]
     fn format_code_inserts_space() {
         assert_eq!(format_code("123456"), "123 456");
+        assert_eq!(format_code("12345678"), "1234 5678");
         assert_eq!(format_code("1234"), "12 34");
     }
 }

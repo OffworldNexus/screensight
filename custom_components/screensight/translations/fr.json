@@ -3,26 +3,26 @@
     "step": {
       "pair": {
         "title": "Associer un écran Screensight",
-        "description": "Enter the 6-digit code shown on the {device_name} display, then confirm the pairing on the panel.",
+        "description": "Enter the 8-digit code shown on the {device_name} display, then confirm the pairing on the panel.",
         "data": {
           "code": "Code d'association",
           "name": "Nom de Home Assistant"
         },
         "data_description": {
-          "code": "The code is drawn on the device's screen while its pairing window is open.",
+          "code": "The code is drawn on the device's screen after it has exchanged keys with Home Assistant.",
           "name": "The friendly name the device shows when asking you to confirm the pairing."
         }
       }
     },
     "progress": {
+      "pair_connect": "Exchanging keys with the {device_name} display…",
       "pair_confirm": "En attente de votre confirmation sur l'écran {device_name}…"
     },
     "error": {
-      "invalid_code": "That code was rejected by the device.",
-      "invalid_code_format": "The pairing code must be exactly 6 digits.",
+      "invalid_code": "That code does not match the one shown on the device.",
+      "invalid_code_format": "The pairing code must be exactly 8 digits.",
       "rate_limited": "Too many attempts; wait a moment and try again.",
       "window_closed": "The pairing window on the device has closed. Re-open it and try again.",
-      "wrong_device": "This code belongs to a different device.",
       "pairing_timeout": "The device did not answer in time.",
       "cannot_connect": "Could not reach the device over the network.",
       "unknown": "An unexpected error occurred while pairing."
@@ -33,6 +33,8 @@
       "already_configured": "This device is already paired with Home Assistant.",
       "pairing_declined": "The pairing was declined on the device.",
       "pairing_timed_out": "The pairing confirmation timed out on the device.",
+      "cannot_connect": "Could not reach the device over the network.",
+      "pairing_timeout": "The device did not answer in time.",
       "reauth_successful": "Re-authentication succeeded.",
       "reconfigure_successful": "The device was paired again.",
       "unknown": "An unexpected error occurred while pairing."

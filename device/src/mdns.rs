@@ -2,8 +2,9 @@
 //!
 //! Avahi already owns UDP/5353 on the device, so rather than run a second
 //! responder (which would fight it) we ask Avahi to publish a `_screensight._tcp`
-//! service with our TXT records. The pairing code is deliberately absent from
-//! the TXT payload — it lives only on the panel and is verified on the device.
+//! service with our TXT records. The pairing secret is the Noise handshake and
+//! its derived SAS, so the TXT payload carries only the device's *public* static
+//! key (`key=`) — never the SAS or any private key.
 //!
 //! When the pairing window opens/closes the `pairing=1` key must appear or
 //! disappear; Avahi has no reliable in-place TXT edit across versions, so we
@@ -39,15 +40,18 @@ const RECONCILE: Duration = Duration::from_secs(2);
 
 /// Build the Avahi TXT payload (`aay`) for the current state.
 ///
-/// The only keys are `id`, `model`, `api`, `version` and (while the window is
-/// open) `pairing`. Nothing else is ever advertised.
+/// The keys are `id`, `model`, `api`, `version`, the device's static public key
+/// (`key`, public by definition), plus
+/// `pairing=1` while the window is open. The SAS, any private key and any
+/// pairing secret are never advertised.
 #[must_use]
-pub fn txt_records(identity: &DeviceIdentity, pairing: bool) -> Vec<Vec<u8>> {
+pub fn txt_records(identity: &DeviceIdentity, public_key_hex: &str, pairing: bool) -> Vec<Vec<u8>> {
     let mut records = vec![
         ("id", identity.id.clone()),
         ("model", identity.model.clone()),
         ("api", API_VERSION.to_string()),
         ("version", identity.version.clone()),
+        ("key", public_key_hex.to_owned()),
     ];
     if pairing {
         records.push(("pairing", "1".to_owned()));
@@ -117,7 +121,7 @@ async fn publish_group(
         .await?;
 
     let identity = runtime.identity();
-    let txt = txt_records(&identity, pairing);
+    let txt = txt_records(&identity, &runtime.public_key_hex(), pairing);
     let _: () = group
         .call(
             "AddService",
@@ -176,34 +180,47 @@ mod tests {
             .collect()
     }
 
+    fn public_key() -> String {
+        "ab".repeat(32)
+    }
+
     #[test]
     fn pairing_flag_present_only_while_open() {
-        let open = keys(&txt_records(&identity(), true));
+        let open = keys(&txt_records(&identity(), &public_key(), true));
         assert!(open.iter().any(|r| r == "pairing=1"));
-        let closed = keys(&txt_records(&identity(), false));
+        let closed = keys(&txt_records(&identity(), &public_key(), false));
         assert!(!closed.iter().any(|r| r.starts_with("pairing=")));
     }
 
     #[test]
+    fn advertises_public_key_and_api_version_one() {
+        let records = keys(&txt_records(&identity(), &public_key(), false));
+        assert!(records
+            .iter()
+            .any(|r| r == &format!("key={}", public_key())));
+        assert!(records.iter().any(|r| r == "api=1"));
+    }
+
+    #[test]
     fn txt_contains_only_allowlisted_keys() {
-        let records = txt_records(&identity(), true);
+        let records = txt_records(&identity(), &public_key(), true);
         for record in keys(&records) {
             let key = record.split('=').next().unwrap();
             assert!(
-                ["id", "model", "api", "version", "pairing"].contains(&key),
+                ["id", "model", "api", "version", "key", "pairing"].contains(&key),
                 "unexpected TXT key: {key}"
             );
         }
     }
 
     #[test]
-    fn pairing_code_never_appears_in_txt() {
-        // The TXT builder is never handed the code, so this asserts the
+    fn pairing_secret_never_appears_in_txt() {
+        // The TXT builder is never handed the SAS, so this asserts the
         // allowlist holds even for a representative panel code.
-        let code = "724196";
-        let records = txt_records(&identity(), true);
+        let sas = "93704101";
+        let records = txt_records(&identity(), &public_key(), true);
         for record in keys(&records) {
-            assert!(!record.contains(code), "code leaked into TXT: {record}");
+            assert!(!record.contains(sas), "SAS leaked into TXT: {record}");
         }
     }
 }

@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::identity::DeviceIdentity;
+use crate::identity::{DeviceIdentity, DeviceKeys};
 
 /// One Home Assistant instance the device has been paired with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,8 +23,9 @@ pub struct PairedInstance {
     pub ha_id: String,
     /// Friendly name shown on the panel during confirmation.
     pub ha_name: String,
-    /// Long-lived bearer token minted at pairing time.
-    pub token: String,
+    /// Home Assistant's static Noise public key, hex-encoded. Presented at
+    /// reconnect (Noise IK) to authenticate the peer.
+    pub ha_static_key: String,
     /// Last address we saw this instance at, for diagnostics only.
     pub last_ip: Option<String>,
     /// Unix seconds at which pairing completed.
@@ -35,6 +36,8 @@ pub struct PairedInstance {
 pub struct Snapshot {
     /// Stable device identity (generated on first boot).
     pub identity: DeviceIdentity,
+    /// The device's long-lived Noise static keypair.
+    pub keys: DeviceKeys,
     /// Paired instances.
     pub instances: Vec<PairedInstance>,
     /// `ha_id` of the instance allowed to drive the display.
@@ -262,22 +265,25 @@ pub fn now_unix() -> u64 {
 pub fn new_instance(
     ha_id: &str,
     ha_name: &str,
-    token: String,
+    ha_static_key: String,
     last_ip: Option<String>,
 ) -> PairedInstance {
     PairedInstance {
         ha_id: ha_id.to_owned(),
         ha_name: ha_name.to_owned(),
-        token,
+        ha_static_key,
         last_ip,
         paired_at_unix: now_unix(),
     }
 }
 
-/// Build a snapshot with a freshly generated identity (tests and first boot).
+/// Build a snapshot with a freshly generated identity and static keypair (tests
+/// and first boot).
+#[must_use]
 pub fn snapshot_with(identity: DeviceIdentity) -> Snapshot {
     Snapshot {
         identity,
+        keys: DeviceKeys::generate().expect("OS randomness for the test device keypair"),
         instances: Vec::new(),
         selected: None,
         values: std::collections::HashMap::new(),
@@ -292,7 +298,7 @@ mod tests {
         PairedInstance {
             ha_id: id.to_owned(),
             ha_name: format!("Home {id}"),
-            token: "deadbeef".to_owned(),
+            ha_static_key: "deadbeef".to_owned(),
             last_ip: Some("10.0.0.2".to_owned()),
             paired_at_unix: now_unix(),
         }

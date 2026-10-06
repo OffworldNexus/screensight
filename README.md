@@ -24,7 +24,7 @@ all 800×480 device screens, bundled fonts).
 ┌───────────────────────────┐        mDNS  _screensight._tcp        ┌──────────────────────┐
 │  Raspberry Pi 4           │  ◄───────────────────────────────►   │  Home Assistant       │
 │  cage (Wayland kiosk)     │                                      │  custom_components/   │
-│   └─ screensightd         │        WebSocket  /ws  (Bearer)      │   screensight         │
+│   └─ screensightd         │        WebSocket  /ws  (Noise)       │   screensight         │
 │        • identity/store   │  ◄───────────────────────────────►   │   • zeroconf config   │
 │        • WS server        │        heartbeat + set_value         │     flow              │
 │        • mDNS (Avahi)     │                                      │   • connection mgr    │
@@ -34,21 +34,33 @@ all 800×480 device screens, bundled fonts).
 ```
 
 * **Discovery** — the device publishes `_screensight._tcp` via Avahi with TXT
-  keys `id`, `model`, `api` and `version` (plus `pairing=1` only while the
-  pairing window is open). Home Assistant discovers it with no manual IP entry.
-* **Pairing** — the panel draws a 6-digit code. The user types it into the Home
-  Assistant config flow; the code is verified *on the device*. The panel then
-  names the Home Assistant asking to pair and the user approves on the touch
-  panel. Only then is a long-lived token issued over the same WebSocket. The
-  code is never advertised over mDNS.
+  keys `id`, `model`, `api=1`, `version` and its static public key
+  (`key=<hex>`, public by definition), plus `pairing=1` only while the pairing
+  window is open. Home Assistant discovers it with no manual IP entry.
+* **Pairing** — the device and Home Assistant run **Noise XX** over the existing
+  `/ws` WebSocket (binary frames), then each derives an 8-digit SAS from the
+  handshake. The panel shows it; the user types it into the config flow and Home
+  Assistant compares it *locally* — the code is never transmitted. On a match the
+  user approves on the panel and the two sides store each other's static public
+  key.
+* **Link** — after pairing, Home Assistant reconnects with **Noise IK**, presenting
+  its static key. The device authenticates the peer by that key and encrypts
+  every application frame; a passive capture yields no plaintext and no reusable
+  credential. An unknown key cannot send `set_value`/`set_state`.
 * **Multi-pair** — the device can be paired with several Home Assistant
   instances at once (for example a dev and a prod instance). Each keeps its own
   display state; only the selected one is shown. `screensight select <id>`
   switches which instance drives the panel.
-* **Link** — a persistent WebSocket with an application-level heartbeat. Home
+* **Heartbeat** — a persistent WebSocket with an application-level heartbeat. Home
   Assistant pushes per-key dashboard values (`set_value`, or a full `set_state`
   on reconnect); the device stores them per paired instance and renders the
   selected one. Components subscribe to the keys they need (see `state.rs`).
+* **Persistence** — SQLite schema changes use ordered `sea-orm-migration`
+  migrations in `device/src/migration/`, starting with
+  `m000001_create_tables.rs`. Startup applies pending migrations and records
+  them in `seaql_migrations`. Add future migrations to the `Migrator` list;
+  keep applied migration definitions unchanged rather than generating them
+  from evolving runtime entities.
 
 The renderer CPU-rasterises the whole 800×480 frame (fonts, Unicode shaping,
 emoji fallback) and blits it through GPUI as a single image. This deliberately
@@ -126,7 +138,7 @@ control socket:
 
 ```sh
 screensight status              # identity, pairing window, paired instances
-screensight pair                # open/re-arm the pairing window (prints the code)
+screensight pair                # open/re-arm the pairing window
 screensight cancel-pair         # close the window without pairing
 screensight unpair <id>         # forget one instance
 screensight unpair --all        # forget every instance
@@ -179,8 +191,8 @@ traps your shell; `Ctrl+C` during `make ha-dev-logs` only stops the log stream.
 To drive the device without Home Assistant at all:
 
 ```sh
-uv run --no-project scripts/fake-ha.py pair --code <code>     # prints the token after you confirm
-uv run --no-project scripts/fake-ha.py text --token <token> "hello from the CLI"
+uv run --no-project scripts/fake-ha.py pair                     # reads the SAS from the panel
+uv run --no-project scripts/fake-ha.py text "hello from the CLI"
 ```
 
 For a fully offline device-only run:
@@ -211,10 +223,11 @@ make ha-bdd      # only the @bdd scenarios
 ```
 
 * Rust: unit tests across identity, the SQLite store, the state manager,
-  pairing/rate limiting and the runtime, plus WebSocket end-to-end tests
-  (pairing → approval → token → `set_value`) in `device/tests/`.
-* Python: config-flow, connection and text-entity tests, plus pytest-bdd
-  scenarios with Allure reporting.
+  pairing/rate limiting, the Noise transport and the runtime, plus WebSocket
+  end-to-end tests (XX pairing → SAS → approval → key-authenticated
+  `set_value`) in `device/tests/`.
+* Python: config-flow, Noise transport, connection and text-entity tests, plus
+  pytest-bdd scenarios with Allure reporting.
 * GitHub Actions: `.github/workflows/rust.yml` (fmt, clippy, tests, release
   build with the `gui` feature) and `.github/workflows/python.yml` (ruff, mypy,
   pytest, Allure artifact).

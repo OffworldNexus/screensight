@@ -36,47 +36,80 @@ fn main() {
         .unwrap_or_else(|| "/tmp/opencode/screensight-screens".to_owned());
     fs::create_dir_all(&dir).expect("creating output directory");
 
-    let screens: Vec<(&str, Screen)> = vec![
+    let screens: Vec<(&str, Screen, f32)> = vec![
         (
             "splash",
             Screen::Splash {
                 name: "Brave Otter".to_owned(),
             },
+            0.0,
         ),
-        ("idle", Screen::Idle),
+        ("idle", Screen::Idle, 0.0),
         (
-            "pairing",
-            Screen::Pairing {
-                code: "724196".to_owned(),
+            "pairing-waiting",
+            Screen::PairingWaiting {
                 name: "Brave Otter".to_owned(),
             },
+            0.6,
         ),
+        (
+            "pairing-handshake",
+            Screen::PairingHandshake {
+                name: "Brave Otter".to_owned(),
+            },
+            0.3,
+        ),
+        (
+            "pairing-code",
+            Screen::PairingCode {
+                sas: "93704101".to_owned(),
+            },
+            0.0,
+        ),
+        ("pairing-error", Screen::PairingError, 0.0),
         (
             "confirm",
             Screen::Confirm {
                 ha_name: "Home Assistant / My home".to_owned(),
             },
+            0.0,
         ),
         (
             "dashboard-text",
             dashboard("It's going to rain from 3pm until 4pm 🌧"),
+            0.0,
         ),
         (
             "dashboard-unicode",
             dashboard("Studio · 21.4°C · café ☕ · こんにちは · Ω≈ç√"),
+            0.0,
         ),
         (
             "dashboard-empty",
             Screen::Dashboard {
                 values: BTreeMap::new(),
             },
+            0.0,
         ),
     ];
 
-    for (name, screen) in screens {
-        let (canvas, hits) = screens::frame_for(&screen);
+    for (name, screen, elapsed) in screens {
+        let (canvas, hits) = screens::frame_for_with(&screen, None, elapsed);
         let path = Path::new(&dir).join(format!("{name}.ppm"));
         write_ppm(&path, &canvas);
         println!("{} ({} hit regions)", path.display(), hits.len());
+    }
+
+    // A full loader cycle makes geometry and motion review possible without
+    // depending on the emulator's desktop compositor or a running HA server.
+    let waiting = Screen::PairingWaiting {
+        name: "Brave Otter".to_owned(),
+    };
+    for index in 0..48 {
+        let (canvas, _) = screens::frame_for_with(&waiting, None, index as f32 * 0.05);
+        write_ppm(
+            &Path::new(&dir).join(format!("loader-{index:02}.ppm")),
+            &canvas,
+        );
     }
 }

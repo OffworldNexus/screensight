@@ -1,4 +1,4 @@
-//! OS-randomness helpers used for identity, pairing codes and tokens.
+//! OS-randomness helpers used for identity and pairing key material.
 
 use anyhow::Result;
 
@@ -15,7 +15,7 @@ pub fn hex(n: usize) -> Result<String> {
 }
 
 /// Uniformly draw a `u32` in `0..modulus` using rejection sampling, so no
-/// modulo bias creeps into the 6-digit pairing code.
+/// modulo bias creeps into drawn values.
 pub fn u32_below(modulus: u32) -> Result<u32> {
     assert!(modulus > 0, "modulus must be positive");
     // Largest multiple of `modulus` that fits in a u32; values at or above it

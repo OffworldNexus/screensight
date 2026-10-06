@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "homeassistant",
+    "noiseprotocol>=0.3.1",
 ]
 
 [dependency-groups]
@@ -41,7 +42,7 @@ module = ["homeassistant.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["voluptuous.*", "zeroconf.*", "syrupy.*"]
+module = ["voluptuous.*", "zeroconf.*", "syrupy.*", "noise.*", "noise"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

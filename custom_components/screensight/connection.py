@@ -1,9 +1,10 @@
-"""Reconnecting WebSocket connection to a paired Screensight device.
+"""Reconnecting Noise WebSocket connection to a paired Screensight device.
 
-The connection is deliberately a small state machine rather than a
-:class:`~homeassistant.helpers.update_coordinator.DataUpdateCoordinator`: the
-device pushes state on its own schedule, so we keep a persistent socket, mirror
-the latest ``state`` frame, and notify entities whenever anything changes.
+The device pushes state on its own schedule, so the connection is a small state
+machine rather than a ``DataUpdateCoordinator``: it keeps a persistent socket,
+runs a Noise IK handshake using the cached static keys, mirrors the latest
+decrypted ``state`` frame, and notifies entities whenever anything changes.
+Every application frame is encrypted.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+import async_timeout
 from aiohttp import WSMsgType
 from homeassistant.components import zeroconf as zeroconf_component
 from homeassistant.core import callback
@@ -25,6 +27,7 @@ from zeroconf.asyncio import AsyncServiceBrowser
 
 from .const import (
     CONF_HOST,
+    CONNECT_TIMEOUT,
     HEARTBEAT_INTERVAL,
     MAX_MISSED_HEARTBEATS,
     RECONNECT_MAX,
@@ -37,8 +40,10 @@ from .const import (
     TYPE_SET_STATE,
     TYPE_SET_VALUE,
     TYPE_STATE,
+    UNKNOWN_KEY_MARKER,
     WS_PATH,
 )
+from .noise_transport import SUBPROTOCOL_IK, NoiseTransport, receive_binary
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -58,8 +63,12 @@ class ScreensightConnectionError(HomeAssistantError):
     """Raised internally when the device connection can no longer be trusted."""
 
 
+class ScreensightAuthError(ScreensightConnectionError):
+    """Raised when the device rejects our static key (unknown peer)."""
+
+
 class ScreensightConnection:
-    """A persistent, self-healing WebSocket client for one device."""
+    """A persistent, self-healing Noise WebSocket client for one device."""
 
     def __init__(
         self,
@@ -68,7 +77,8 @@ class ScreensightConnection:
         *,
         host: str,
         port: int,
-        token: str,
+        ha_private: bytes,
+        device_static: bytes,
         service_name: str | None = None,
     ) -> None:
         """Prepare the connection manager without opening a socket yet."""
@@ -76,10 +86,12 @@ class ScreensightConnection:
         self._entry = entry
         self._host = host
         self._port = port
-        self._token = token
+        self._ha_private = ha_private
+        self._device_static = device_static
         self._service_name = service_name
 
         self._ws: Any | None = None
+        self._transport: NoiseTransport | None = None
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
         self._connected = False
@@ -160,11 +172,10 @@ class ScreensightConnection:
     async def async_set_value(self, key: str, value: str) -> None:
         """Send ``set_value`` and optimistically mirror it locally."""
         async with self._write_lock:
-            ws = self._ws
-            if not self._connected or ws is None:
+            if not self._connected or self._ws is None:
                 msg = "Screensight device is not connected; cannot set value"
                 raise HomeAssistantError(msg)
-            await ws.send_json({"type": TYPE_SET_VALUE, "key": key, "value": value})
+            await self._async_send({"type": TYPE_SET_VALUE, "key": key, "value": value})
             self._desired[key] = value
             self._values[key] = value
             self._notify()
@@ -178,6 +189,16 @@ class ScreensightConnection:
                 await self._connect_and_listen()
             except asyncio.CancelledError:
                 raise
+            except ScreensightAuthError:
+                _LOGGER.warning(
+                    "Screensight device %s rejected our key; starting re-pairing",
+                    self._host,
+                )
+                self._set_connected(False)
+                with contextlib.suppress(Exception):
+                    self._entry.async_start_reauth(self.hass)
+                self._stopping = True
+                break
             except Exception:
                 self._failures += 1
                 _LOGGER.debug(
@@ -197,25 +218,51 @@ class ScreensightConnection:
         return float(min(RECONNECT_MIN * (2**exponent), RECONNECT_MAX))
 
     async def _connect_and_listen(self) -> None:
-        """Open the socket and pump frames until it drops."""
+        """Open the socket, run Noise IK, and pump frames until it drops."""
         host = await self._async_resolve_host()
         session = aiohttp_client.async_get_clientsession(self.hass)
         url = f"ws://{host}:{self._port}{WS_PATH}"
-        headers = {"Authorization": f"Bearer {self._token}"}
+        transport = NoiseTransport.ik_initiator(self._ha_private, self._device_static)
         try:
-            async with session.ws_connect(url, headers=headers, heartbeat=None) as ws:
-                self._ws = ws
-                self._failures = 0
-                self._set_connected(True)
-                # Re-send the full state we hold so a device that rebooted or
-                # missed frames converges on Home Assistant's values.
-                if self._desired:
-                    await ws.send_json(
-                        {"type": TYPE_SET_STATE, "values": dict(self._desired)}
-                    )
-                await self._async_read_loop(ws)
+            async with async_timeout.timeout(CONNECT_TIMEOUT):
+                ws = await session.ws_connect(
+                    url, protocols=(SUBPROTOCOL_IK,), heartbeat=None
+                )
+                await ws.send_bytes(transport.write_handshake())
+                transport.read_handshake(await receive_binary(ws))
+                if not transport.finished:
+                    msg = "Noise IK handshake did not finish"
+                    raise ScreensightConnectionError(msg)
+        except TimeoutError as err:
+            msg = "Screensight connection timed out"
+            raise ScreensightConnectionError(msg) from err
+
+        self._ws = ws
+        self._transport = transport
+        try:
+            self._failures = 0
+            self._set_connected(True)
+            # Re-send the full state we hold so a device that rebooted or missed
+            # frames converges on Home Assistant's values.
+            if self._desired:
+                await self._async_send(
+                    {"type": TYPE_SET_STATE, "values": dict(self._desired)}
+                )
+            await self._async_read_loop(ws)
         finally:
             self._ws = None
+            self._transport = None
+            with contextlib.suppress(Exception):
+                await ws.close()
+
+    async def _async_send(self, message: _Message) -> None:
+        """Encrypt one application frame and write it as a binary frame."""
+        ws = self._ws
+        transport = self._transport
+        if ws is None or transport is None:
+            msg = _LOST_CONNECTION
+            raise ScreensightConnectionError(msg)
+        await ws.send_bytes(transport.encrypt(json.dumps(message).encode()))
 
     async def _async_read_loop(self, ws: Any) -> None:
         """Read frames, sending an application-level ping on idle."""
@@ -229,12 +276,17 @@ class ScreensightConnection:
                 missed += 1
                 if missed >= MAX_MISSED_HEARTBEATS:
                     raise ScreensightConnectionError(_LOST_CONNECTION) from None
-                await ws.send_json({"type": TYPE_PING})
+                await self._async_send({"type": TYPE_PING})
                 continue
 
-            if message.type is WSMsgType.TEXT:
+            if message.type is WSMsgType.BINARY:
                 missed = 0
-                await self._async_handle_message(json.loads(message.data))
+                transport = self._transport
+                if transport is None:
+                    raise ScreensightConnectionError(_LOST_CONNECTION)
+                await self._async_handle_message(
+                    json.loads(transport.decrypt(bytes(message.data)))
+                )
             elif message.type in (
                 WSMsgType.CLOSE,
                 WSMsgType.CLOSING,
@@ -253,9 +305,10 @@ class ScreensightConnection:
         elif message_type == TYPE_PONG:
             return
         elif message_type == TYPE_ERROR:
-            _LOGGER.warning(
-                "Screensight device reported an error: %s", message.get("message")
-            )
+            text = str(message.get("message", ""))
+            if UNKNOWN_KEY_MARKER in text:
+                raise ScreensightAuthError(text)
+            _LOGGER.warning("Screensight device reported an error: %s", text)
         else:
             _LOGGER.debug("Ignoring unknown Screensight frame: %s", message_type)
 
@@ -358,6 +411,7 @@ class ScreensightConnection:
     async def _close_ws(self) -> None:
         """Close the current socket, ignoring errors during teardown."""
         ws, self._ws = self._ws, None
+        self._transport = None
         if ws is None:
             return
         with contextlib.suppress(Exception):

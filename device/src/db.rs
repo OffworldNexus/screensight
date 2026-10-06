@@ -5,9 +5,7 @@
 //! dashboard values). The connection is owned by a background writer task; the
 //! runtime only sends it [`PersistCommand`]s, so writes never block the panel.
 //!
-//! The schema is created with `CREATE TABLE IF NOT EXISTS` on open. That is
-//! enough for a device whose database is created fresh on first boot; a numbered
-//! migration system can replace it if the schema ever needs to evolve.
+//! Numbered SeaORM migrations create and evolve the schema on startup.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -16,12 +14,14 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Set};
+use sea_orm::{ConnectOptions, Database, DatabaseConnection, Set};
+use sea_orm_migration::MigratorTrait;
 use sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
-use crate::identity::DeviceIdentity;
+use crate::identity::{DeviceIdentity, DeviceKeys};
+use crate::migration::Migrator;
 use crate::store::{PairedInstance, PersistCommand, Snapshot};
 
 mod entity {
@@ -39,6 +39,10 @@ mod entity {
             pub name: String,
             pub model: String,
             pub version: String,
+            /// X25519 static private key, hex-encoded.
+            pub noise_private: String,
+            /// X25519 static public key, hex-encoded.
+            pub noise_public: String,
         }
 
         #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -57,7 +61,8 @@ mod entity {
             #[sea_orm(primary_key, auto_increment = false)]
             pub ha_id: String,
             pub ha_name: String,
-            pub token: String,
+            /// Home Assistant's static Noise public key, hex-encoded.
+            pub ha_static_key: String,
             pub last_ip: Option<String>,
             pub paired_at: i64,
             pub selected: bool,
@@ -90,29 +95,6 @@ mod entity {
     }
 }
 
-const SCHEMA: [&str; 3] = [
-    "CREATE TABLE IF NOT EXISTS device (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        model TEXT NOT NULL,
-        version TEXT NOT NULL
-    )",
-    "CREATE TABLE IF NOT EXISTS instances (
-        ha_id TEXT PRIMARY KEY NOT NULL,
-        ha_name TEXT NOT NULL,
-        token TEXT NOT NULL,
-        last_ip TEXT,
-        paired_at INTEGER NOT NULL,
-        selected INTEGER NOT NULL DEFAULT 0
-    )",
-    "CREATE TABLE IF NOT EXISTS kv (
-        instance_id TEXT NOT NULL,
-        key TEXT NOT NULL,
-        value TEXT NOT NULL,
-        PRIMARY KEY (instance_id, key)
-    )",
-];
-
 /// Open (creating if needed) the database at `path` and ensure the schema.
 pub async fn open(path: &Path) -> Result<DatabaseConnection> {
     if let Some(parent) = path.parent() {
@@ -139,56 +121,52 @@ async fn connect(url: &str) -> Result<DatabaseConnection> {
     let db = Database::connect(options)
         .await
         .with_context(|| format!("opening sqlite database {url}"))?;
-    for statement in SCHEMA {
-        db.execute_unprepared(statement)
-            .await
-            .context("creating schema")?;
-    }
+    Migrator::up(&db, None)
+        .await
+        .context("applying database migrations")?;
     Ok(db)
 }
 
-/// Load the device identity (generating and storing it on first boot) and all
-/// paired instances and their values.
+/// Load the device identity (generating it on first boot) and all paired
+/// instances and their values.
 pub async fn load_snapshot(
     db: &DatabaseConnection,
     model: &str,
     version: &str,
 ) -> Result<Snapshot> {
-    let mut identity = match entity::device::Entity::find().one(db).await? {
-        Some(row) => DeviceIdentity {
-            id: row.id,
-            name: row.name,
-            model: row.model,
-            version: row.version,
-        },
+    let existing = entity::device::Entity::find().one(db).await?;
+    let identity;
+    let keys;
+    match existing {
+        Some(row) => {
+            identity = DeviceIdentity {
+                id: row.id.clone(),
+                name: row.name.clone(),
+                model: row.model.clone(),
+                version: row.version.clone(),
+            };
+            keys = DeviceKeys {
+                private: crate::noise::from_hex(&row.noise_private)
+                    .context("decoding the device private key")?,
+                public: crate::noise::from_hex(&row.noise_public)
+                    .context("decoding the device public key")?,
+            };
+        }
         None => {
-            let identity = DeviceIdentity::generate(model, version)?;
+            identity = DeviceIdentity::generate(model, version)?;
+            keys = DeviceKeys::generate()?;
             entity::device::ActiveModel {
                 id: Set(identity.id.clone()),
                 name: Set(identity.name.clone()),
                 model: Set(identity.model.clone()),
                 version: Set(identity.version.clone()),
+                noise_private: Set(keys.private_hex()),
+                noise_public: Set(keys.public_hex()),
             }
             .insert(db)
             .await
             .context("inserting device identity")?;
-            identity
         }
-    };
-
-    // Devices first seen before names were generated carry `screensight-<hex>`;
-    // re-baptise them once so older installs get a friendly name too.
-    if crate::names::is_legacy(&identity.name) {
-        identity.name = crate::names::generate().context("re-baptising device")?;
-        entity::device::Entity::update_many()
-            .col_expr(
-                entity::device::Column::Name,
-                Expr::value(identity.name.clone()),
-            )
-            .filter(entity::device::Column::Id.eq(identity.id.clone()))
-            .exec(db)
-            .await
-            .context("updating device name")?;
     }
 
     let rows = entity::instance::Entity::find().all(db).await?;
@@ -201,7 +179,7 @@ pub async fn load_snapshot(
         instances.push(PairedInstance {
             ha_id: row.ha_id,
             ha_name: row.ha_name,
-            token: row.token,
+            ha_static_key: row.ha_static_key,
             last_ip: row.last_ip,
             paired_at_unix: u64::try_from(row.paired_at).unwrap_or(0),
         });
@@ -218,6 +196,7 @@ pub async fn load_snapshot(
 
     Ok(Snapshot {
         identity,
+        keys,
         instances,
         selected,
         values,
@@ -275,7 +254,7 @@ async fn upsert_instance(db: &DatabaseConnection, instance: &PairedInstance) -> 
     entity::instance::Entity::insert(entity::instance::ActiveModel {
         ha_id: Set(instance.ha_id.clone()),
         ha_name: Set(instance.ha_name.clone()),
-        token: Set(instance.token.clone()),
+        ha_static_key: Set(instance.ha_static_key.clone()),
         last_ip: Set(instance.last_ip.clone()),
         paired_at: Set(i64::try_from(instance.paired_at_unix).unwrap_or(i64::MAX)),
         selected: Set(false),
@@ -284,7 +263,7 @@ async fn upsert_instance(db: &DatabaseConnection, instance: &PairedInstance) -> 
         OnConflict::column(entity::instance::Column::HaId)
             .update_columns([
                 entity::instance::Column::HaName,
-                entity::instance::Column::Token,
+                entity::instance::Column::HaStaticKey,
                 entity::instance::Column::LastIp,
                 entity::instance::Column::PairedAt,
             ])
@@ -350,13 +329,16 @@ mod tests {
             .unwrap();
         assert!(first.instances.is_empty());
         assert_eq!(first.identity.model, "Screensight Studio");
+        assert_eq!(first.keys.public.len(), 32);
 
-        // Reload keeps the same identity.
+        // Reload keeps the same identity and static keys.
         let second = load_snapshot(&db, "ignored", "ignored").await.unwrap();
         assert_eq!(first.identity.id, second.identity.id);
+        assert_eq!(first.keys.public, second.keys.public);
+        assert_eq!(first.keys.private, second.keys.private);
 
         // Pair an instance, select it and set a value.
-        let instance = new_instance("ha1", "Home", "tok".to_owned(), None);
+        let instance = new_instance("ha1", "Home", "ab".repeat(32), None);
         apply(&db, PersistCommand::UpsertInstance(instance))
             .await
             .unwrap();
@@ -374,6 +356,8 @@ mod tests {
         .await
         .unwrap();
 
+        // Re-running migrations never clears paired state.
+        Migrator::up(&db, None).await.unwrap();
         let loaded = load_snapshot(&db, "x", "y").await.unwrap();
         assert_eq!(loaded.instances.len(), 1);
         assert_eq!(loaded.selected.as_deref(), Some("ha1"));
@@ -390,7 +374,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_database_uses_wal_and_foreign_keys() {
-        use sea_orm::{DatabaseBackend, Statement};
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
         let dir = std::env::temp_dir().join(format!(
             "screensight-db-wal-{}-{}",
@@ -425,27 +409,5 @@ mod tests {
         assert_eq!(foreign_keys, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn legacy_device_names_are_replaced() {
-        let db = connect("sqlite::memory:").await.unwrap();
-        entity::device::ActiveModel {
-            id: Set("abc123".to_owned()),
-            name: Set("screensight-deadbeef".to_owned()),
-            model: Set("Screensight Studio".to_owned()),
-            version: Set("0.1.0".to_owned()),
-        }
-        .insert(&db)
-        .await
-        .unwrap();
-
-        let snapshot = load_snapshot(&db, "ignored", "ignored").await.unwrap();
-        assert_eq!(snapshot.identity.id, "abc123");
-        assert!(!crate::names::is_legacy(&snapshot.identity.name));
-
-        // The new name is persisted, not regenerated on every read.
-        let reloaded = load_snapshot(&db, "ignored", "ignored").await.unwrap();
-        assert_eq!(reloaded.identity.name, snapshot.identity.name);
     }
 }

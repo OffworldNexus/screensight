@@ -6,10 +6,11 @@ from typing import TYPE_CHECKING
 
 from .connection import ScreensightConnection
 from .const import (
+    CONF_DEVICE_STATIC_KEY,
+    CONF_HA_PRIVATE_KEY,
     CONF_HOST,
     CONF_PORT,
     CONF_SERVICE_NAME,
-    CONF_TOKEN,
     DOMAIN,
     PLATFORMS,
 )
@@ -26,7 +27,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry,
         host=entry.data[CONF_HOST],
         port=entry.data[CONF_PORT],
-        token=entry.data[CONF_TOKEN],
+        ha_private=bytes.fromhex(entry.data[CONF_HA_PRIVATE_KEY]),
+        device_static=bytes.fromhex(entry.data[CONF_DEVICE_STATIC_KEY]),
         service_name=entry.data.get(CONF_SERVICE_NAME),
     )
     await connection.async_start()
