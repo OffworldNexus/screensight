@@ -38,17 +38,6 @@ jobs:
       - name: cargo build --release (device, gui)
         run: cargo build --release -p screensight --features gui
 
-  # The aarch64 release build needs the custom `cross` image (see Cross.toml,
-  # deploy/cross-image/Dockerfile). GitHub-hosted runners cannot build that
-  # image cheaply, so this job is intentionally left disabled.
-  #
-  # cross-aarch64:
-  #   name: Release build (aarch64)
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: 1.98.1
-  #     - run: cargo install cross --version 0.2.5
-  #     - run: cargo cross build --release --target aarch64-unknown-linux-gnu
+  # The aarch64 build needs the custom `cross` image (see Cross.toml and
+  # deploy/cross-image/Dockerfile). It is built and packaged into a `.deb` by
+  # `.github/workflows/release.yml` on version tags, not on every push.

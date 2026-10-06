@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="150" viewBox="0 0 960 150" role="img" aria-labelledby="title desc">
+  <title id="title">Screensight palette</title>
+  <desc id="desc">Plumage teal #0BB2B3, deep plumage #0A7577, gorget gold #F2A900, crown orange #C9541F, sand #A3968A and ink #141110.</desc>
+  <rect width="960" height="150" rx="8" fill="#211c18"/>
+  <g stroke="#3a322c" stroke-width="1">
+    <rect x="22"  y="26" width="146" height="60" rx="4" fill="#0bb2b3"/>
+    <rect x="176" y="26" width="146" height="60" rx="4" fill="#0a7577"/>
+    <rect x="330" y="26" width="146" height="60" rx="4" fill="#f2a900"/>
+    <rect x="484" y="26" width="146" height="60" rx="4" fill="#c9541f"/>
+    <rect x="638" y="26" width="146" height="60" rx="4" fill="#a3968a"/>
+    <rect x="792" y="26" width="146" height="60" rx="4" fill="#141110"/>
+  </g>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" text-anchor="middle">
+    <g fill="#a3968a" font-size="13">
+      <text x="95"  y="112">PLUMAGE</text>
+      <text x="249" y="112">PLUMAGE·D</text>
+      <text x="403" y="112">GORGET</text>
+      <text x="557" y="112">CROWN</text>
+      <text x="711" y="112">SAND</text>
+      <text x="865" y="112">INK</text>
+    </g>
+    <g fill="#faf7f2" font-size="13">
+      <text x="95"  y="132">#0BB2B3</text>
+      <text x="249" y="132">#0A7577</text>
+      <text x="403" y="132">#F2A900</text>
+      <text x="557" y="132">#C9541F</text>
+      <text x="711" y="132">#A3968A</text>
+      <text x="865" y="132">#141110</text>
+    </g>
+  </g>
+</svg>

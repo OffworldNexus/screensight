@@ -8,9 +8,12 @@ if [ "$1" = configure ]; then
     # would prevent Screensight's cage from taking the display.
     systemctl disable --now gpui-poc.service >/dev/null 2>&1 || true
     systemctl disable --now kiosk.service >/dev/null 2>&1 || true
-    systemctl enable screensight.socket >/dev/null 2>&1 || true
-    systemctl enable cage.service >/dev/null 2>&1 || true
-    systemctl enable screensightd.service >/dev/null 2>&1 || true
+    # `reenable` (not `enable`): it first removes any stale [Install] symlinks
+    # an earlier package version may have written for a different target (e.g.
+    # graphical.target), so a WantedBy change actually takes effect on upgrade.
+    systemctl reenable screensight.socket >/dev/null 2>&1 || true
+    systemctl reenable cage.service >/dev/null 2>&1 || true
+    systemctl reenable screensightd.service >/dev/null 2>&1 || true
     # Pick up the new units without requiring a reboot.
     systemctl restart cage.service >/dev/null 2>&1 || true
     systemctl restart screensight.socket >/dev/null 2>&1 || true
