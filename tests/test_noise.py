@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from noise.connection import Keypair, NoiseConnection
 
-from custom_components.screensight.noise import (
+from custom_components.screensight.noise_transport import (
     IK_PATTERN,
     SAS_DIGITS,
     SAS_MODULUS,

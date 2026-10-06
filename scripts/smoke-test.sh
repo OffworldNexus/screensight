@@ -3,14 +3,15 @@
 # no physical panel:
 #
 #   boot -> mDNS -> pairing window -> WebSocket pairing -> on-device confirm
-#   (via the control CLI) -> token -> set_value round trip.
+#   (via the control CLI) -> saved static keys -> Noise IK set_value round trip.
 #
 # Requires the Rust toolchain; uses `uv` for the WebSocket client when present
 # (otherwise it tells you to run the Rust integration test instead).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/screensight-smoke.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp/opencode}/screensight-smoke.XXXXXX")"
+KEYS="${WORK}/keys.json"
 PORT="${SCREENSIGHT_HTTP_PORT:-18765}"
 export SCREENSIGHT_STATE_DIR="${WORK}/state"
 export SCREENSIGHT_CONTROL_SOCKET="${WORK}/control.sock"
@@ -20,15 +21,34 @@ BIN="${ROOT}/target/debug"
 DAEMON_PID=""
 FAKE_PID=""
 cleanup() {
+    result=$?
+    if [ "${result}" -ne 0 ]; then
+        echo "==> failure diagnostics" >&2
+        status_json >"${WORK}/status.log" 2>&1 || true
+        for log in status daemon fake fake-text confirm mdns; do
+            if [ -f "${WORK}/${log}.log" ]; then
+                echo "--- ${log}.log (last 100 lines) ---" >&2
+                tail -n 100 "${WORK}/${log}.log" >&2
+            fi
+        done
+    fi
     [ -n "${FAKE_PID}" ] && kill "${FAKE_PID}" 2>/dev/null || true
     [ -n "${DAEMON_PID}" ] && kill "${DAEMON_PID}" 2>/dev/null || true
-    rm -rf "${WORK}"
+    [ -n "${FAKE_PID}" ] && wait "${FAKE_PID}" 2>/dev/null || true
+    [ -n "${DAEMON_PID}" ] && wait "${DAEMON_PID}" 2>/dev/null || true
+    if [ "${result}" -eq 0 ]; then
+        rm -rf "${WORK}"
+    else
+        # Retain diagnostics, not private pairing keys or device state.
+        rm -rf "${KEYS}" "${WORK}/state" "${WORK}/code" "${WORK}/control.sock"
+        echo "Failure logs retained in ${WORK}" >&2
+    fi
 }
 trap cleanup EXIT
 
 status_json() { "${BIN}/screensight" --json status; }
-pairing_code() {
-    status_json | grep -oE '"pairing_code":"[0-9]{6}"' | grep -oE '[0-9]{6}' | head -1
+pairing_sas() {
+    status_json | grep -oE '"sas":"[0-9]{8}"' | grep -oE '[0-9]{8}' | head -1
 }
 device_id() {
     status_json | grep -oE '"id":"[0-9a-f]+"' | sed -E 's/.*:"(.*)"/\1/' | head -1
@@ -48,44 +68,77 @@ done
 echo "==> status"
 status_json
 
-CODE="$(pairing_code)"
 ID="$(device_id)"
-[ -n "${CODE}" ] || { echo "FAIL: no pairing code in status" >&2; exit 1; }
-echo "    device id: ${ID}   pairing code: ${CODE}"
+echo "    device id: ${ID}"
 
 echo "==> mDNS TXT check (if avahi-browse is available)"
 if command -v avahi-browse >/dev/null 2>&1; then
-    "${ROOT}/scripts/check-mdns.sh" || true
+    "${ROOT}/scripts/check-mdns.sh" _screensight._tcp "${ID}" >"${WORK}/mdns.log" 2>&1 || {
+        echo "FAIL: mDNS TXT check for ${ID}" >&2
+        exit 1
+    }
+    cat "${WORK}/mdns.log"
 else
     echo "    avahi-browse not installed; skipping"
 fi
 
 echo "==> re-arming pairing window"
 "${BIN}/screensight" pair >/dev/null
-CODE="$(pairing_code)"
-echo "    new pairing code: ${CODE}"
 
 echo "==> full WebSocket pairing + set_value"
 if command -v uv >/dev/null 2>&1; then
-    uv run "${ROOT}/scripts/fake-ha.py" --port "${PORT}" pair \
-        --code "${CODE}" --device-id "${ID}" >"${WORK}/fake.log" 2>&1 &
+    mkfifo "${WORK}/code"
+    # Open both ends so startup failures cannot block the shell on FIFO open.
+    exec 3<>"${WORK}/code"
+    # The parent's read/write descriptor makes the child's read-only open
+    # nonblocking. Close the inherited descriptor in the client so stdin sees
+    # EOF after the parent delivers the code and closes its writer.
+    PYTHONUNBUFFERED=1 timeout 60s uv run "${ROOT}/scripts/fake-ha.py" --port "${PORT}" --keys "${KEYS}" pair \
+        <"${WORK}/code" 3>&- >"${WORK}/fake.log" 2>&1 &
     FAKE_PID=$!
-    sleep 3
+    # XX must finish before a SAS exists.
+    CODE=""
+    for _ in $(seq 1 200); do
+        CODE="$(pairing_sas || true)"
+        [ -n "${CODE}" ] && break
+        kill -0 "${FAKE_PID}" 2>/dev/null || {
+            echo "FAIL: pairing client exited before SAS was available" >&2
+            exit 1
+        }
+        sleep 0.1
+    done
+    [ -n "${CODE}" ] || { echo "FAIL: no SAS after handshake" >&2; exit 1; }
+    printf '%s\n' "${CODE}" >&3
+    exec 3>&-
+    CONFIRMED=false
     # Simulate the user tapping "Pair" on the panel.
-    "${BIN}/screensight" confirm >/dev/null
-    wait "${FAKE_PID}" || true
-    FAKE_PID=""
-
-    TOKEN="$(grep -oE 'token = [0-9a-f]{64}' "${WORK}/fake.log" | awk '{print $3}' || true)"
-    if [ -z "${TOKEN}" ]; then
+    for _ in $(seq 1 100); do
+        if "${BIN}/screensight" confirm >"${WORK}/confirm.log" 2>&1; then
+            CONFIRMED=true
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "${CONFIRMED}" != true ] || ! wait "${FAKE_PID}"; then
         echo "FAIL: pairing did not complete" >&2
         cat "${WORK}/fake.log" >&2
         exit 1
     fi
-    echo "    paired; token acquired"
+    FAKE_PID=""
 
-    uv run "${ROOT}/scripts/fake-ha.py" --port "${PORT}" text \
-        --token "${TOKEN}" "smoke test ✓"
+    if [ ! -s "${KEYS}" ]; then
+        echo "FAIL: pairing did not complete" >&2
+        cat "${WORK}/fake.log" >&2
+        exit 1
+    fi
+    echo "    paired; static keys saved"
+
+    PYTHONUNBUFFERED=1 timeout 30s uv run "${ROOT}/scripts/fake-ha.py" --port "${PORT}" --keys "${KEYS}" text \
+        "smoke test ✓" >"${WORK}/fake-text.log" 2>&1 || {
+        cat "${WORK}/fake-text.log" >&2
+        exit 1
+    }
+    cat "${WORK}/fake-text.log"
     echo "==> final status"
     status_json
 else

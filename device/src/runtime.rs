@@ -381,7 +381,7 @@ impl Runtime {
     }
 
     /// Authenticate a peer by the static public key it presented. Returns the
-    /// paired instance, replacing the old bearer-token check.
+    /// paired instance if the key is known.
     #[must_use]
     pub fn authenticate_by_static_key(&self, key_hex: &str) -> Option<PairedInstance> {
         self.store
@@ -467,7 +467,7 @@ impl Runtime {
         ha_id.map(|id| self.state.values(&id)).unwrap_or_default()
     }
 
-    /// Full paired instance record (including token), if paired.
+    /// Full paired instance record, including its static public key, if paired.
     #[must_use]
     pub fn paired_instance(&self, ha_id: &str) -> Option<PairedInstance> {
         self.store

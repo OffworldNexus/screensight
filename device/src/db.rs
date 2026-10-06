@@ -5,9 +5,7 @@
 //! dashboard values). The connection is owned by a background writer task; the
 //! runtime only sends it [`PersistCommand`]s, so writes never block the panel.
 //!
-//! The schema is created with `CREATE TABLE IF NOT EXISTS` on open. That is
-//! enough for a device whose database is created fresh on first boot; a numbered
-//! migration system can replace it if the schema ever needs to evolve.
+//! SeaORM creates the initial schema directly from the entities on first boot.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -16,9 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, Set, Statement,
-};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Schema, Set};
 use sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
@@ -41,8 +37,7 @@ mod entity {
             pub name: String,
             pub model: String,
             pub version: String,
-            /// X25519 static private key, hex-encoded. Empty on a row that
-            /// predates Noise; `load_snapshot` fills it in.
+            /// X25519 static private key, hex-encoded.
             pub noise_private: String,
             /// X25519 static public key, hex-encoded.
             pub noise_public: String,
@@ -98,40 +93,6 @@ mod entity {
     }
 }
 
-/// Current on-disk schema version (`PRAGMA user_version`). Bumped by [`migrate`].
-///
-/// Version 2 introduced the Noise static keys and dropped the bearer-token
-/// pairing model. Because token pairings cannot be upgraded to key pairings,
-/// migration discards `instances`/`kv` and forces a re-pair on Home Assistant;
-/// the device identity row is preserved so its mDNS id and name survive.
-const SCHEMA_VERSION: i64 = 2;
-
-/// The base device table, in its pre-Noise shape. Migration adds the key columns.
-const DEVICE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS device (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
-    model TEXT NOT NULL,
-    version TEXT NOT NULL
-)";
-
-/// Paired instances, keyed by Home Assistant's static Noise public key.
-const INSTANCES_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS instances (
-    ha_id TEXT PRIMARY KEY NOT NULL,
-    ha_name TEXT NOT NULL,
-    ha_static_key TEXT NOT NULL,
-    last_ip TEXT,
-    paired_at INTEGER NOT NULL,
-    selected INTEGER NOT NULL DEFAULT 0
-)";
-
-/// Per-instance dashboard values.
-const KV_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS kv (
-    instance_id TEXT NOT NULL,
-    key TEXT NOT NULL,
-    value TEXT NOT NULL,
-    PRIMARY KEY (instance_id, key)
-)";
-
 /// Open (creating if needed) the database at `path` and ensure the schema.
 pub async fn open(path: &Path) -> Result<DatabaseConnection> {
     if let Some(parent) = path.parent() {
@@ -158,82 +119,24 @@ async fn connect(url: &str) -> Result<DatabaseConnection> {
     let db = Database::connect(options)
         .await
         .with_context(|| format!("opening sqlite database {url}"))?;
-    migrate(&db).await?;
+    create_schema(&db).await?;
     Ok(db)
 }
 
-/// Bring the database up to [`SCHEMA_VERSION`], creating the final schema on a
-/// fresh install and destructively resetting an older one.
-async fn migrate(db: &DatabaseConnection) -> Result<()> {
-    let version: i64 = db
-        .query_one_raw(Statement::from_string(
-            DatabaseBackend::Sqlite,
-            "PRAGMA user_version;".to_owned(),
-        ))
-        .await
-        .context("reading schema version")?
-        .context("PRAGMA user_version returned no row")?
-        .try_get_by_index(0)
-        .context("decoding schema version")?;
-    if version >= SCHEMA_VERSION {
-        return Ok(());
+/// Create missing tables without duplicating the entity definitions or touching
+/// persisted identities, pairings and dashboard values on subsequent boots.
+async fn create_schema(db: &DatabaseConnection) -> Result<()> {
+    let backend = db.get_database_backend();
+    let schema = Schema::new(backend);
+    for mut table in [
+        schema.create_table_from_entity(entity::device::Entity),
+        schema.create_table_from_entity(entity::instance::Entity),
+        schema.create_table_from_entity(entity::kv::Entity),
+    ] {
+        db.execute_raw(backend.build(table.if_not_exists()))
+            .await
+            .context("creating database schema")?;
     }
-
-    // The device identity predates Noise: create the base table, then add the
-    // key columns. Existing rows get empty keys that `load_snapshot` fills in.
-    db.execute_unprepared(DEVICE_SCHEMA)
-        .await
-        .context("creating device table")?;
-    add_column_if_missing(db, "device", "noise_private", "TEXT NOT NULL DEFAULT ''").await?;
-    add_column_if_missing(db, "device", "noise_public", "TEXT NOT NULL DEFAULT ''").await?;
-
-    // Token-based pairings are invalid under Noise; drop them and their values
-    // rather than trying to invent static keys for them.
-    db.execute_unprepared("DROP TABLE IF EXISTS instances")
-        .await
-        .context("dropping legacy instances")?;
-    db.execute_unprepared("DROP TABLE IF EXISTS kv")
-        .await
-        .context("dropping legacy values")?;
-    db.execute_unprepared(INSTANCES_SCHEMA)
-        .await
-        .context("creating instances table")?;
-    db.execute_unprepared(KV_SCHEMA)
-        .await
-        .context("creating kv table")?;
-    db.execute_unprepared(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
-        .await
-        .context("storing schema version")?;
-    Ok(())
-}
-
-/// Add a column to `table` if `PRAGMA table_info` does not already list it.
-async fn add_column_if_missing(
-    db: &DatabaseConnection,
-    table: &str,
-    column: &str,
-    declaration: &str,
-) -> Result<()> {
-    let rows = db
-        .query_all_raw(Statement::from_string(
-            DatabaseBackend::Sqlite,
-            format!("PRAGMA table_info({table});"),
-        ))
-        .await
-        .with_context(|| format!("inspecting {table}"))?;
-    for row in &rows {
-        let name: String = row
-            .try_get_by_index(1)
-            .with_context(|| format!("reading a {table} column name"))?;
-        if name == column {
-            return Ok(());
-        }
-    }
-    db.execute_unprepared(&format!(
-        "ALTER TABLE {table} ADD COLUMN {column} {declaration};"
-    ))
-    .await
-    .with_context(|| format!("adding {table}.{column}"))?;
     Ok(())
 }
 
@@ -245,7 +148,7 @@ pub async fn load_snapshot(
     version: &str,
 ) -> Result<Snapshot> {
     let existing = entity::device::Entity::find().one(db).await?;
-    let mut identity;
+    let identity;
     let keys;
     match existing {
         Some(row) => {
@@ -255,31 +158,11 @@ pub async fn load_snapshot(
                 model: row.model.clone(),
                 version: row.version.clone(),
             };
-            // A row migrated from the token era has empty key columns; mint the
-            // device's Noise identity once and persist it.
-            keys = if row.noise_private.is_empty() || row.noise_public.is_empty() {
-                let keys = DeviceKeys::generate()?;
-                entity::device::Entity::update_many()
-                    .col_expr(
-                        entity::device::Column::NoisePrivate,
-                        Expr::value(keys.private_hex()),
-                    )
-                    .col_expr(
-                        entity::device::Column::NoisePublic,
-                        Expr::value(keys.public_hex()),
-                    )
-                    .filter(entity::device::Column::Id.eq(row.id.clone()))
-                    .exec(db)
-                    .await
-                    .context("persisting generated device keys")?;
-                keys
-            } else {
-                DeviceKeys {
-                    private: crate::noise::from_hex(&row.noise_private)
-                        .context("decoding the device private key")?,
-                    public: crate::noise::from_hex(&row.noise_public)
-                        .context("decoding the device public key")?,
-                }
+            keys = DeviceKeys {
+                private: crate::noise::from_hex(&row.noise_private)
+                    .context("decoding the device private key")?,
+                public: crate::noise::from_hex(&row.noise_public)
+                    .context("decoding the device public key")?,
             };
         }
         None => {
@@ -297,21 +180,6 @@ pub async fn load_snapshot(
             .await
             .context("inserting device identity")?;
         }
-    }
-
-    // Devices first seen before names were generated carry `screensight-<hex>`;
-    // re-baptise them once so older installs get a friendly name too.
-    if crate::names::is_legacy(&identity.name) {
-        identity.name = crate::names::generate().context("re-baptising device")?;
-        entity::device::Entity::update_many()
-            .col_expr(
-                entity::device::Column::Name,
-                Expr::value(identity.name.clone()),
-            )
-            .filter(entity::device::Column::Id.eq(identity.id.clone()))
-            .exec(db)
-            .await
-            .context("updating device name")?;
     }
 
     let rows = entity::instance::Entity::find().all(db).await?;
@@ -501,6 +369,8 @@ mod tests {
         .await
         .unwrap();
 
+        // Schema initialization is idempotent and never clears paired state.
+        create_schema(&db).await.unwrap();
         let loaded = load_snapshot(&db, "x", "y").await.unwrap();
         assert_eq!(loaded.instances.len(), 1);
         assert_eq!(loaded.selected.as_deref(), Some("ha1"));
@@ -552,69 +422,5 @@ mod tests {
         assert_eq!(foreign_keys, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn legacy_device_names_are_replaced() {
-        let db = connect("sqlite::memory:").await.unwrap();
-        entity::device::ActiveModel {
-            id: Set("abc123".to_owned()),
-            name: Set("screensight-deadbeef".to_owned()),
-            model: Set("Screensight Studio".to_owned()),
-            version: Set("0.1.0".to_owned()),
-            noise_private: Set(String::new()),
-            noise_public: Set(String::new()),
-        }
-        .insert(&db)
-        .await
-        .unwrap();
-
-        let snapshot = load_snapshot(&db, "ignored", "ignored").await.unwrap();
-        assert_eq!(snapshot.identity.id, "abc123");
-        assert!(!crate::names::is_legacy(&snapshot.identity.name));
-        // A migrated row with empty key columns is given a static keypair.
-        assert_eq!(snapshot.keys.public.len(), 32);
-
-        // The new name is persisted, not regenerated on every read.
-        let reloaded = load_snapshot(&db, "ignored", "ignored").await.unwrap();
-        assert_eq!(reloaded.identity.name, snapshot.identity.name);
-        assert_eq!(reloaded.keys.public, snapshot.keys.public);
-    }
-
-    #[tokio::test]
-    async fn legacy_token_schema_is_reset_and_invalidated() {
-        let db = connect("sqlite::memory:").await.unwrap();
-
-        // Recreate the pre-Noise schema, including a "paired" token instance.
-        db.execute_unprepared("DROP TABLE IF EXISTS instances")
-            .await
-            .unwrap();
-        db.execute_unprepared(
-            "CREATE TABLE instances (
-                ha_id TEXT PRIMARY KEY NOT NULL,
-                ha_name TEXT NOT NULL,
-                token TEXT NOT NULL,
-                last_ip TEXT,
-                paired_at INTEGER NOT NULL,
-                selected INTEGER NOT NULL DEFAULT 0
-            )",
-        )
-        .await
-        .unwrap();
-        db.execute_unprepared("INSERT INTO instances VALUES ('ha1', 'Home', 'tok', NULL, 0, 1)")
-            .await
-            .unwrap();
-        db.execute_unprepared("PRAGMA user_version = 1;")
-            .await
-            .unwrap();
-
-        // Re-running migration upgrades (and invalidates) the old rows.
-        super::migrate(&db).await.unwrap();
-        let loaded = load_snapshot(&db, "m", "v").await.unwrap();
-        assert!(
-            loaded.instances.is_empty(),
-            "token pairings must be dropped"
-        );
-        assert_eq!(loaded.keys.public.len(), 32);
     }
 }

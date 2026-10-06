@@ -4,7 +4,7 @@ The device pushes state on its own schedule, so the connection is a small state
 machine rather than a ``DataUpdateCoordinator``: it keeps a persistent socket,
 runs a Noise IK handshake using the cached static keys, mirrors the latest
 decrypted ``state`` frame, and notifies entities whenever anything changes.
-Every application frame is encrypted; there is no bearer token anywhere.
+Every application frame is encrypted.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from .const import (
     UNKNOWN_KEY_MARKER,
     WS_PATH,
 )
-from .noise import SUBPROTOCOL_IK, NoiseTransport, receive_binary
+from .noise_transport import SUBPROTOCOL_IK, NoiseTransport, receive_binary
 
 if TYPE_CHECKING:
     from collections.abc import Callable

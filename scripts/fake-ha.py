@@ -6,11 +6,11 @@
 
 Pairing runs Noise XX over the device's ``/ws`` endpoint, exactly as Home
 Assistant does. The device shows an 8-digit SAS on its panel once the handshake
-completes; type it here to finish pairing. No token is issued: the script stores
+completes; type it here to finish pairing. The script stores
 Home Assistant's static key and the device's static key so ``text`` can reconnect
 with Noise IK.
 
-The keys are written to ``--keys`` (default ``/tmp/screensight-fake-ha.json``)
+The keys are written to ``--keys`` (default ``~/.screensight-fake-ha.json``)
 and reused by the ``text`` command.
 
   Pair:
@@ -99,16 +99,18 @@ async def pair(host: str, port: int, keys_path: Path) -> None:
     async with websockets.connect(
         ws_url(host, port), subprotocols=["screensight.noise.xx"]
     ) as ws:
+        print("connected; starting Noise XX", flush=True)
         await ws.send(bytes(connection.write_message()))
         connection.read_message(await receive_binary(ws))
         device_static = bytes(connection.noise_protocol.handshake_state.rs.public_bytes)
         await ws.send(bytes(connection.write_message()))
 
         sas = sas_from_handshake_hash(connection.get_handshake_hash())
+        print("Noise XX complete; waiting for the panel SAS on stdin", flush=True)
         typed = await asyncio.to_thread(input, "Code on the panel: ")
         if typed.strip() != sas:
-            print(f"SAS mismatch (expected {sas}); aborting")
-            return
+            msg = "SAS mismatch; aborting pairing"
+            raise RuntimeError(msg)
 
         frame = {"type": "pair", "ha_id": ha_id, "ha_name": "Fake Home Assistant"}
         await ws.send(connection.encrypt(json.dumps(frame).encode()))
@@ -121,7 +123,8 @@ async def pair(host: str, port: int, keys_path: Path) -> None:
             elif kind == "pair_success":
                 break
             elif kind in {"pair_error", "pair_rejected"}:
-                return
+                msg = f"pairing failed: {message}"
+                raise RuntimeError(msg)
 
     await asyncio.to_thread(
         keys_path.write_text,

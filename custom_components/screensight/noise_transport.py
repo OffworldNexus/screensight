@@ -36,9 +36,6 @@ SAS_DIGITS: Final = 8
 #: SAS values are drawn uniformly from ``0..SAS_MODULUS``.
 SAS_MODULUS: Final = 100_000_000
 
-#: How long a peer may stall a handshake step before the socket is abandoned.
-HANDSHAKE_TIMEOUT: Final = 10.0
-
 
 def generate_keypair() -> tuple[bytes, bytes]:
     """Generate an X25519 static keypair as ``(private_bytes, public_bytes)``."""

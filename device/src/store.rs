@@ -24,8 +24,7 @@ pub struct PairedInstance {
     /// Friendly name shown on the panel during confirmation.
     pub ha_name: String,
     /// Home Assistant's static Noise public key, hex-encoded. Presented at
-    /// reconnect (Noise IK) to authenticate the peer; this replaces the old
-    /// long-lived bearer token.
+    /// reconnect (Noise IK) to authenticate the peer.
     pub ha_static_key: String,
     /// Last address we saw this instance at, for diagnostics only.
     pub last_ip: Option<String>,

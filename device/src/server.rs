@@ -10,7 +10,7 @@
 //! one Noise message. The handshake runs first, under a hard timeout so a
 //! stalled peer cannot hold device resources; only then does the encrypted
 //! application loop begin. A connection is authenticated when the initiator's
-//! static key matches a paired instance — there is no bearer token anywhere.
+//! static key matches a paired instance.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -5299,7 +5299,6 @@ dependencies = [
  "sha2 0.10.9",
  "snow",
  "sqlx",
- "subtle",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "unicode-script",

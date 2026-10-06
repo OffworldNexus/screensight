@@ -101,17 +101,6 @@ async def test_zeroconf_not_pairing_aborts(hass) -> None:
     assert result["reason"] == "not_pairing"
 
 
-async def test_zeroconf_old_firmware_aborts(hass) -> None:
-    """A device without the Noise marker cannot be paired."""
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": SOURCE_ZEROCONF},
-        data=make_discovery(properties={"id": DEVICE_ID, "pairing": "1"}),
-    )
-    assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "unsupported_firmware"
-
-
 async def test_zeroconf_already_configured_aborts(hass) -> None:
     """A device already paired with this instance is not paired twice."""
     MockConfigEntry(domain=DOMAIN, unique_id=DEVICE_ID, data=_ENTRY_DATA).add_to_hass(
@@ -147,8 +136,6 @@ async def test_handshake_then_code_creates_entry(hass, monkeypatch) -> None:
     assert result["data"][CONF_DEVICE_STATIC_KEY] == DEVICE_STATIC_KEY
     assert result["data"][CONF_HA_PRIVATE_KEY]
     assert result["data"][CONF_HA_PUBLIC_KEY]
-    # No long-lived token is ever stored.
-    assert "token" not in result["data"]
     assert result["title"] == "screensight-ab12cd34"
 
 

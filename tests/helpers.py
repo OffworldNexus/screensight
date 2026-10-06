@@ -3,7 +3,8 @@
 The Home Assistant test harness blocks real sockets, so every test drives the
 integration through these fakes instead of a live device. The Noise transport
 itself is faked with a tag-prefixed identity cipher; the real crypto lives in
-``custom_components/screensight/noise.py`` and is exercised by ``test_noise.py``.
+``custom_components/screensight/noise_transport.py`` and is exercised by
+``test_noise.py``.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ def make_discovery(**overrides: Any) -> ZeroconfServiceInfo:
     properties: dict[str, Any] = {
         "id": DEVICE_ID,
         "pairing": "1",
-        "noise": "1",
+        "api": "1",
         "model": "Screensight Studio",
         "version": "0.1.0",
         "key": DEVICE_STATIC_KEY,

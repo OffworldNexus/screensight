@@ -2,17 +2,16 @@
 
 Pairing follows the Noise XX ordering required by OFF-220:
 
-1. The device advertises ``_screensight._tcp.local.`` with ``pairing=1`` and a
-   ``noise=1`` marker while its pairing window is open.
+1. The device advertises ``_screensight._tcp.local.`` with ``pairing=1`` while
+   its pairing window is open.
 2. Home Assistant opens ``/ws`` negotiating the ``screensight.noise.xx``
    subprotocol and completes the Noise XX handshake. The handshake yields a
-   6/8-digit SAS on both sides; the device shows it on the panel.
+   8-digit SAS on both sides; the device shows it on the panel.
 3. Only *after* the handshake does the flow ask the user for the code shown on
    the panel. The typed value is compared locally with Home Assistant's own SAS
    and is never transmitted.
 4. On a match, Home Assistant names itself inside the now-authenticated channel,
-   the user approves on the panel, and the flow completes. No token is issued:
-   the mutual static keys are the pairing.
+   the user approves on the panel, and the flow stores the mutual static keys.
 
 The live WebSocket and Noise session are held on the flow object across steps,
 because a second XX handshake would derive a different SAS.
@@ -64,7 +63,7 @@ from .const import (
     TYPE_PAIR_SUCCESS,
     WS_PATH,
 )
-from .noise import (
+from .noise_transport import (
     SAS_DIGITS,
     SUBPROTOCOL_XX,
     NoiseTransport,
@@ -148,10 +147,6 @@ class ScreensightConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="no_device_id")
         if properties.get("pairing") != "1":
             return self.async_abort(reason="not_pairing")
-        if properties.get("noise") != "1":
-            # Old token-only firmware; it cannot take part in a Noise pairing.
-            return self.async_abort(reason="unsupported_firmware")
-
         self._device_id = str(device_id)
         await self.async_set_unique_id(self._device_id)
         self._abort_if_unique_id_configured()
@@ -195,10 +190,8 @@ class ScreensightConfigFlow(ConfigFlow, domain=DOMAIN):
         self._version = entry.data.get(CONF_VERSION)
         self._device_static_key = entry.data.get(CONF_DEVICE_STATIC_KEY)
         # Reuse Home Assistant's existing keypair so its identity is stable.
-        private_hex = entry.data.get(CONF_HA_PRIVATE_KEY)
-        if private_hex:
-            self._ha_private = bytes.fromhex(private_hex)
-            self._ha_public = public_from_private(self._ha_private)
+        self._ha_private = bytes.fromhex(entry.data[CONF_HA_PRIVATE_KEY])
+        self._ha_public = public_from_private(self._ha_private)
         return await self.async_step_connect()
 
     # -- handshake (XX) -----------------------------------------------------

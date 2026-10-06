@@ -94,7 +94,6 @@ mod tests {
 
         assert_eq!(a.id.len(), ID_BYTES * 2);
         assert!(a.id.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(!crate::names::is_legacy(&a.name));
         assert_eq!(a.name.split(' ').count(), 2);
         assert_eq!(a.model, "Screensight Studio");
         assert_eq!(a.version, "0.1.0");

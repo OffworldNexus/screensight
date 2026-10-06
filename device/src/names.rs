@@ -157,13 +157,6 @@ pub fn generate() -> Result<String> {
     Ok(format!("{adjective} {noun}"))
 }
 
-/// Whether `name` looks like the pre-word-list `screensight-<hex>` identity that
-/// older installs persisted and should be re-baptised.
-#[must_use]
-pub fn is_legacy(name: &str) -> bool {
-    name == "screensight" || name.starts_with("screensight-")
-}
-
 fn pick(words: &[&'static str]) -> Result<&'static str> {
     let index = random::u32_below(words.len() as u32)? as usize;
     Ok(words[index])
@@ -194,12 +187,5 @@ mod tests {
         for adjective in ADJECTIVES {
             assert!(!NOUNS.contains(adjective), "{adjective} is in both lists");
         }
-    }
-
-    #[test]
-    fn legacy_names_are_recognised() {
-        assert!(is_legacy("screensight-17d98b22"));
-        assert!(is_legacy("screensight"));
-        assert!(!is_legacy("Brave Otter"));
     }
 }

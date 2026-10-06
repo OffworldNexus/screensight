@@ -4,7 +4,7 @@
 //! responder (which would fight it) we ask Avahi to publish a `_screensight._tcp`
 //! service with our TXT records. The pairing secret is the Noise handshake and
 //! its derived SAS, so the TXT payload carries only the device's *public* static
-//! key (`key=`) and a `noise=1` marker — never the SAS or any private key.
+//! key (`key=`) — never the SAS or any private key.
 //!
 //! When the pairing window opens/closes the `pairing=1` key must appear or
 //! disappear; Avahi has no reliable in-place TXT edit across versions, so we
@@ -41,7 +41,7 @@ const RECONCILE: Duration = Duration::from_secs(2);
 /// Build the Avahi TXT payload (`aay`) for the current state.
 ///
 /// The keys are `id`, `model`, `api`, `version`, the device's static public key
-/// (`key`, public by definition) and the Noise marker (`noise=1`), plus
+/// (`key`, public by definition), plus
 /// `pairing=1` while the window is open. The SAS, any private key and any
 /// pairing secret are never advertised.
 #[must_use]
@@ -51,7 +51,6 @@ pub fn txt_records(identity: &DeviceIdentity, public_key_hex: &str, pairing: boo
         ("model", identity.model.clone()),
         ("api", API_VERSION.to_string()),
         ("version", identity.version.clone()),
-        ("noise", "1".to_owned()),
         ("key", public_key_hex.to_owned()),
     ];
     if pairing {
@@ -194,13 +193,11 @@ mod tests {
     }
 
     #[test]
-    fn advertises_noise_marker_and_public_key() {
+    fn advertises_public_key_and_api_version_one() {
         let records = keys(&txt_records(&identity(), &public_key(), false));
-        assert!(records.iter().any(|r| r == "noise=1"));
         assert!(records
             .iter()
             .any(|r| r == &format!("key={}", public_key())));
-        // api stays 1 until 1.0; only `noise=1` is added for compatibility.
         assert!(records.iter().any(|r| r == "api=1"));
     }
 
@@ -210,7 +207,7 @@ mod tests {
         for record in keys(&records) {
             let key = record.split('=').next().unwrap();
             assert!(
-                ["id", "model", "api", "version", "noise", "key", "pairing"].contains(&key),
+                ["id", "model", "api", "version", "key", "pairing"].contains(&key),
                 "unexpected TXT key: {key}"
             );
         }

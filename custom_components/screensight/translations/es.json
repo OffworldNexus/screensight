@@ -30,7 +30,6 @@
     "abort": {
       "no_device_id": "The discovered device did not advertise an identifier.",
       "not_pairing": "This device is not currently in pairing mode.",
-      "unsupported_firmware": "This device's firmware does not support secure pairing; update it and try again.",
       "already_configured": "This device is already paired with Home Assistant.",
       "pairing_declined": "The pairing was declined on the device.",
       "pairing_timed_out": "The pairing confirmation timed out on the device.",

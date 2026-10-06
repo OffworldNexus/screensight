@@ -34,7 +34,7 @@ all 800×480 device screens, bundled fonts).
 ```
 
 * **Discovery** — the device publishes `_screensight._tcp` via Avahi with TXT
-  keys `id`, `model`, `api`, `version`, `noise=1` and its static public key
+  keys `id`, `model`, `api=1`, `version` and its static public key
   (`key=<hex>`, public by definition), plus `pairing=1` only while the pairing
   window is open. Home Assistant discovers it with no manual IP entry.
 * **Pairing** — the device and Home Assistant run **Noise XX** over the existing
@@ -42,7 +42,7 @@ all 800×480 device screens, bundled fonts).
   handshake. The panel shows it; the user types it into the config flow and Home
   Assistant compares it *locally* — the code is never transmitted. On a match the
   user approves on the panel and the two sides store each other's static public
-  key. No long-lived bearer token ever exists.
+  key.
 * **Link** — after pairing, Home Assistant reconnects with **Noise IK**, presenting
   its static key. The device authenticates the peer by that key and encrypts
   every application frame; a passive capture yields no plaintext and no reusable

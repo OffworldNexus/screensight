@@ -227,7 +227,15 @@ mod tests {
             ha_id: "ha1".into(),
         })
         .unwrap();
-        assert!(!json.contains("token"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({
+                "type": "pair_success",
+                "device_id": "d1",
+                "name": "Brave Otter",
+                "ha_id": "ha1",
+            })
+        );
     }
 
     #[test]
